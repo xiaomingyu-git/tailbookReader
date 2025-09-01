@@ -3,13 +3,16 @@
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --port 7999",
     "build": "vite build",
     "preview": "vite preview",
     "electron": "electron .",
-    "electron-dev": "NODE_ENV=development electron .",
+    "electron-dev": "cross-env NODE_ENV=development electron .",
+    "electron-debug": "cross-env NODE_ENV=development electron . --inspect=5858",
     "start": "npm run build && npm run electron",
-    "app": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && npm run electron-dev\""
+    "kill-port": "npx kill-port 7999",
+    "app": "npm run kill-port && concurrently \"npm run dev\" \"wait-on http://localhost:7999 && npm run electron-dev\"",
+    "debug": "npm run kill-port && concurrently \"npm run dev\" \"wait-on http://localhost:7999 && npm run electron-debug\""
   },
   "keywords": [],
   "author": "",
@@ -17,6 +20,8 @@
   "description": "",
   "dependencies": {
     "@tanstack/react-router": "^1.131.31",
+    "iconv-lite": "^0.7.0",
+    "jschardet": "^3.1.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
@@ -25,7 +30,9 @@
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.0.0",
     "electron": "^37.4.0",
+    "kill-port": "^2.0.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.3",
     "wait-on": "^8.0.4"

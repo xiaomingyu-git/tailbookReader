@@ -4,25 +4,11 @@ import { Router, Route, RootRoute, RouterProvider } from '@tanstack/react-router
 import './index.css'
 import Bookshelf from './pages/Bookshelf'
 import Reading from './pages/Reading'
-import { Link, Outlet } from '@tanstack/react-router'
+import {  Outlet } from '@tanstack/react-router'
 
 const rootRoute = new RootRoute({
   component: () => (
     <>
-      <div style={{ 
-        padding: '20px',
-        backgroundColor: '#fff',
-        borderBottom: '1px solid #eee',
-        display: 'flex',
-        gap: '20px'
-      }}>
-        <Link to="/" style={{ textDecoration: 'none', color: '#333' }}>
-          [书架]
-        </Link>
-        <Link to="/reading" style={{ textDecoration: 'none', color: '#333' }}>
-          [阅读页]
-        </Link>
-      </div>
       <Outlet />
     </>
   ),
@@ -38,6 +24,11 @@ const readingRoute = new Route({
   getParentRoute: () => rootRoute,
   path: '/reading',
   component: Reading,
+  validateSearch: (search: Record<string, unknown>): { bookId?: string } => {
+    return {
+      bookId: typeof search.bookId === 'string' ? search.bookId : undefined,
+    }
+  },
 })
 
 const routeTree = rootRoute.addChildren([indexRoute, readingRoute])
