@@ -72,13 +72,58 @@ const Reading: React.FC = () => {
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [backgroundColor, setBackgroundColor] = useState('#f8f9fa');
   const [brightness, setBrightness] = useState(100);
-  const [lineHeight, setLineHeight] = useState(1.8);
+  const [lineHeight, setLineHeight] = useState(16);
   const [fontFamily, setFontFamily] = useState('system-ui, -apple-system, sans-serif');
   const [paddingTop, setPaddingTop] = useState(60);
   const [paddingBottom, setPaddingBottom] = useState(60);
   const [paddingLeft, setPaddingLeft] = useState(80);
   const [paddingRight, setPaddingRight] = useState(80);
   const [isBookmarkJumping, setIsBookmarkJumping] = useState(false);
+  const webdavSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const settingsSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerWebDAVSync = () => {
+    try {
+      if (!window.electronAPI) return;
+      if (webdavSyncTimerRef.current) {
+        clearTimeout(webdavSyncTimerRef.current);
+      }
+      webdavSyncTimerRef.current = setTimeout(async () => {
+        try {
+          const local = await window.electronAPI.getLocalSettings();
+          const cfg = local?.webdavConfig;
+          if (cfg?.enabled) {
+            console.log('同步当前书籍进度与设置到 WebDAV...');
+            // Prefer fine-grained sync: only current book progress and settings
+            if (book?.id) {
+              try {
+                const res1 = await window.electronAPI.syncBookProgress(book.id);
+                if (!res1?.success) {
+                  console.warn('进度同步失败:', res1?.message);
+                }
+              } catch (e) {
+                console.warn('进度同步异常:', e);
+              }
+              // Some implementations separate cache upload; call if available
+              try {
+                const res2 = await window.electronAPI.uploadBookCache(book.id);
+                if (!res2?.success) {
+                  console.warn('缓存上传失败:', res2?.message);
+                }
+              } catch (e) {
+                console.warn('缓存上传异常:', e);
+              }
+            }
+            // Settings are saved under base path; backend should handle uploading updated settings.json as part of lightweight sync.
+          }
+        } catch (e) {
+          console.error('WebDAV 同步异常:', e);
+        }
+      }, 1200);
+    } catch (e) {
+      console.error('安排 WebDAV 同步失败:', e);
+    }
+  };
 
   useEffect(() => {
     // Load local settings to get WebDAV folder path
@@ -106,6 +151,14 @@ const Reading: React.FC = () => {
     };
 
     initializePaths();
+    return () => {
+      if (webdavSyncTimerRef.current) {
+        clearTimeout(webdavSyncTimerRef.current);
+      }
+      if (settingsSaveTimerRef.current) {
+        clearTimeout(settingsSaveTimerRef.current);
+      }
+    };
   }, [search]);
 
   // Window resize listener with debounce
@@ -523,13 +576,35 @@ const Reading: React.FC = () => {
       };
 
             if (window.electronAPI) {
-        await window.electronAPI.writeFile(settingsFilePath, JSON.stringify(settings, null, 2));
-        console.log('用户设置已保存');
+        const ok = await window.electronAPI.writeFile(settingsFilePath, JSON.stringify(settings, null, 2));
+        if (ok) {
+          console.log('用户设置已保存');
+          triggerWebDAVSync();
+        } else {
+          console.error('用户设置写入失败');
+          alert('保存用户设置失败：无法写入设置文件');
+        }
       }
     } catch (error) {
       console.error('保存用户设置失败:', error);
     }
   };
+
+  // Debounced auto-save when settings change
+  useEffect(() => {
+    if (!settingsFilePath) return;
+    if (settingsSaveTimerRef.current) {
+      clearTimeout(settingsSaveTimerRef.current);
+    }
+    settingsSaveTimerRef.current = setTimeout(() => {
+      saveUserSettings();
+    }, 500);
+    return () => {
+      if (settingsSaveTimerRef.current) {
+        clearTimeout(settingsSaveTimerRef.current);
+      }
+    };
+  }, [fontSize, lineHeight, brightness, fontFamily, backgroundColor, paddingTop, paddingBottom, paddingLeft, paddingRight, settingsFilePath]);
 
   // Load user settings from settings.json
   const loadUserSettings = async () => {
@@ -542,7 +617,14 @@ const Reading: React.FC = () => {
           const settings: UserSettings = JSON.parse(existingData);
 
           setFontSize(settings.fontSize || 16);
-          setLineHeight(settings.lineHeight || 1.8);
+          // Backward compatible: if stored lineHeight looks like a multiplier (<=3), convert to px
+          const loadedLineHeight = settings.lineHeight;
+          if (loadedLineHeight && loadedLineHeight <= 3) {
+            const baseFont = settings.fontSize || 16;
+            setLineHeight(Math.round(baseFont * loadedLineHeight));
+          } else {
+            setLineHeight(loadedLineHeight || 16);
+          }
           setBrightness(settings.brightness || 100);
           setFontFamily(settings.fontFamily || 'system-ui, -apple-system, sans-serif');
           setBackgroundColor(settings.backgroundColor || '#f8f9fa');
@@ -573,8 +655,8 @@ const Reading: React.FC = () => {
       // Split content into paragraphs, keeping empty lines as separators
       const paragraphs = text.split('\n');
 
-      // Estimate lines per page based on font size, line height setting and actual available height
-      const actualLineHeight = fontSize * lineHeight;
+      // Estimate lines per page based on total line height from settings (in px)
+      const actualLineHeight = lineHeight;
       const linesPerPage = Math.max(3, Math.floor(readingAreaHeight / actualLineHeight));
 
       // Estimate characters per line based on actual width and font
@@ -839,9 +921,10 @@ const Reading: React.FC = () => {
           >
             <div style={{
               width: '100%',
-              height: '100%',
+              // Snap height to an integer number of lines to avoid half-clipped last line
+              height: `${Math.max(lineHeight, Math.floor(Math.max(0, (windowSize.height - paddingTop - paddingBottom)) / Math.max(1, lineHeight)) * Math.max(1, lineHeight))}px`,
               fontSize: `${fontSize}px`,
-              lineHeight: lineHeight,
+              lineHeight: `${lineHeight}px`,
               fontFamily: fontFamily,
               color: '#333',
               whiteSpace: 'pre-line',
@@ -1398,16 +1481,16 @@ const Reading: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Line Height Control */}
+                {/* Line Height Control (pixel-based) */}
                 <div style={{ marginBottom: '20px' }}>
-                  <div style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>行距</div>
+                  <div style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>行距（像素）</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <span style={{ fontSize: '12px', color: '#999' }}>紧</span>
                     <input
                       type="range"
-                      min="1.2"
-                      max="2.5"
-                      step="0.1"
+                      min="16"
+                      max="60"
+                      step="1"
                       value={lineHeight}
                       onChange={(e) => {
                         setLineHeight(Number(e.target.value));
@@ -1418,7 +1501,7 @@ const Reading: React.FC = () => {
                     <span style={{ fontSize: '12px', color: '#999' }}>松</span>
                   </div>
                   <div style={{ textAlign: 'center', fontSize: '12px', color: '#999', marginTop: '5px' }}>
-                    {lineHeight.toFixed(1)}
+                    {lineHeight}px
                   </div>
                 </div>
 

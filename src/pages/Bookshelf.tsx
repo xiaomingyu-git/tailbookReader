@@ -68,6 +68,7 @@ const Bookshelf: React.FC = () => {
     password: '',
     enabled: false
   });
+  const [showWebDAVFolderModal, setShowWebDAVFolderModal] = useState(false);
 
 
 
@@ -258,6 +259,7 @@ const Bookshelf: React.FC = () => {
         };
         await saveLocalSettings(newSettings);
         setShowFirstRunSetup(false);
+        setShowWebDAVFolderModal(false);
         alert(`WebDAV同步文件夹已设置为：${folderPath}`);
       }
     } catch (error) {
@@ -520,6 +522,31 @@ const Bookshelf: React.FC = () => {
                 }}
               >
                 📁 导入本地书籍
+              </button>
+              <button
+                onClick={() => {
+                  setShowWebDAVFolderModal(true);
+                  setShowDropdown(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: 'none',
+                  backgroundColor: 'transparent',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  textAlign: 'left',
+                  borderBottom: '1px solid #f0f0f0',
+                  transition: 'background-color 0.2s'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f8f9fa';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+              >
+                📂 设置存储路径
               </button>
               <button
                 onClick={() => {
@@ -823,6 +850,141 @@ const Bookshelf: React.FC = () => {
         </div>
       )}
 
+      {/* WebDAV Folder Modal */}
+      {showWebDAVFolderModal && (
+        <>
+          {/* Overlay */}
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.6)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 2100
+            }}
+            onClick={() => setShowWebDAVFolderModal(false)}
+          />
+
+          {/* Modal */}
+          <div style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            backgroundColor: 'white',
+            borderRadius: '16px',
+            padding: '0',
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
+            zIndex: 2101,
+            minWidth: '560px',
+            maxWidth: '680px',
+            overflow: 'hidden'
+          }}>
+            {/* Header */}
+            <div style={{
+              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+              padding: '20px 28px',
+              color: 'white',
+              textAlign: 'center',
+              position: 'relative'
+            }}>
+              <button
+                onClick={() => setShowWebDAVFolderModal(false)}
+                style={{
+                  position: 'absolute',
+                  top: '12px',
+                  right: '12px',
+                  width: '32px',
+                  height: '32px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.2)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '50%',
+                  cursor: 'pointer',
+                  fontSize: '16px'
+                }}
+              >
+                ×
+              </button>
+              <h3 style={{ margin: 0, fontSize: '20px' }}>设置存储路径</h3>
+              <p style={{ margin: '6px 0 0 0', fontSize: '12px', opacity: 0.9 }}>选择本地用于同步的文件夹路径</p>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '24px' }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                marginBottom: '12px'
+              }}>
+                <input
+                  type="text"
+                  value={localSettings.webdavFolderPath || ''}
+                  readOnly
+                  placeholder="请选择本地同步文件夹"
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    border: '2px solid #e5e7eb',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    backgroundColor: '#f9fafb',
+                    color: '#6b7280'
+                  }}
+                />
+                <button
+                  onClick={handleSelectWebDAVFolder}
+                  style={{
+                    padding: '12px 20px',
+                    backgroundColor: '#10b981',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '500'
+                  }}
+                >
+                  选择文件夹
+                </button>
+              </div>
+              <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                此设置仅保存在本地，用于与 WebDAV 服务器同步目录对应。
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{
+              padding: '16px 24px',
+              backgroundColor: '#f8fafc',
+              borderTop: '1px solid #e5e7eb',
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: '10px'
+            }}>
+              <button
+                onClick={() => setShowWebDAVFolderModal(false)}
+                style={{
+                  padding: '10px 16px',
+                  backgroundColor: '#e5e7eb',
+                  color: '#374151',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* WebDAV Configuration Modal */}
       {showWebDAVConfig && (
         <>
@@ -918,70 +1080,7 @@ const Bookshelf: React.FC = () => {
               maxHeight: 'calc(90vh - 200px)',
               overflowY: 'auto'
             }}>
-              {/* WebDAV Folder Path */}
-              <div style={{ marginBottom: '24px' }}>
-                <label style={{
-                  display: 'block',
-                  fontSize: '14px',
-                  color: '#374151',
-                  marginBottom: '8px',
-                  fontWeight: '500'
-                }}>
-                  📁 WebDAV同步文件夹
-                </label>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px'
-                }}>
-                  <input
-                    type="text"
-                    value={localSettings.webdavFolderPath || ''}
-                    readOnly
-                    placeholder="请先选择WebDAV同步文件夹"
-                    style={{
-                      flex: 1,
-                      padding: '12px 16px',
-                      border: '2px solid #e5e7eb',
-                      borderRadius: '8px',
-                      fontSize: '14px',
-                      backgroundColor: '#f9fafb',
-                      color: '#6b7280'
-                    }}
-                  />
-                  <button
-                    onClick={handleSelectWebDAVFolder}
-                    style={{
-                      padding: '12px 20px',
-                      backgroundColor: '#10b981',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      fontSize: '14px',
-                      fontWeight: '500',
-                      transition: 'background-color 0.2s',
-                      whiteSpace: 'nowrap'
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = '#059669';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = '#10b981';
-                    }}
-                  >
-                    选择文件夹
-                  </button>
-                </div>
-                <p style={{
-                  margin: '8px 0 0 0',
-                  fontSize: '12px',
-                  color: '#6b7280',
-                  lineHeight: '1.4'
-                }}>
-                  选择用于WebDAV同步的本地文件夹
-                </p>
-              </div>
+              {/* Folder selection moved to dedicated modal */}
 
               <div style={{ marginBottom: '24px' }}>
                 <label style={{
@@ -1262,74 +1361,6 @@ const Bookshelf: React.FC = () => {
                 }}
               >
                 ⬇️ 全量下载
-              </button>
-
-              <button
-                onClick={async () => {
-                  try {
-                    if (!window.electronAPI) {
-                      alert('此功能需要在Electron环境中运行');
-                      return;
-                    }
-
-                    // Sync progress for all books
-                    const allBooks = await window.electronAPI.getBooks();
-                    let syncedCount = 0;
-                    let errorCount = 0;
-
-                    for (const book of allBooks) {
-                      try {
-                        const result = await window.electronAPI.syncBookProgress(book.id);
-                        if (result.success) {
-                          syncedCount++;
-                        } else {
-                          errorCount++;
-                        }
-                      } catch (error) {
-                        errorCount++;
-                        console.error(`Failed to sync progress for book ${book.id}:`, error);
-                      }
-                    }
-
-                    if (errorCount === 0) {
-                      alert(`✅ 进度同步完成！成功同步 ${syncedCount} 本书的阅读进度`);
-                    } else {
-                      alert(`⚠️ 进度同步完成！成功同步 ${syncedCount} 本，失败 ${errorCount} 本`);
-                    }
-
-                    // Reload books to show updated progress
-                    loadBooks();
-                  } catch (error) {
-                    console.error('Error syncing all book progress:', error);
-                    alert('进度同步失败：' + error);
-                  }
-                }}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: '#f59e0b',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  transition: 'all 0.2s',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  minWidth: '140px',
-                  justifyContent: 'center'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#d97706';
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f59e0b';
-                  e.currentTarget.style.transform = 'translateY(0)';
-                }}
-              >
-                📊 同步进度
               </button>
             </div>
           </div>

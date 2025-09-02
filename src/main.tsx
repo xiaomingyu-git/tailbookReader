@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { Router, Route, RootRoute, RouterProvider } from '@tanstack/react-router'
+import { Router, Route, RootRoute, RouterProvider, createHashHistory } from '@tanstack/react-router'
 import './index.css'
 import Bookshelf from './pages/Bookshelf'
 import Reading from './pages/Reading'
@@ -33,7 +33,8 @@ const readingRoute = new Route({
 
 const routeTree = rootRoute.addChildren([indexRoute, readingRoute])
 
-const router = new Router({ routeTree })
+const hashHistory = createHashHistory()
+const router = new Router({ routeTree, history: hashHistory })
 
 declare module '@tanstack/react-router' {
   interface Register {
