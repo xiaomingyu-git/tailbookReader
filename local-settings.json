@@ -1,0 +1,11 @@
+{
+  "webdavFolderPath": "/Users/xiaomingyu/Downloads/Books",
+  "isFirstRun": false,
+  "webdavConfig": {
+    "enabled": true,
+    "webdavPath": "https://dav.jianguoyun.com/dav/books",
+    "username": "249461991@qq.com",
+    "password": "atqferedcikwr36q"
+  },
+  "lastUpdated": "2025-09-02T08:59:08.149Z"
+}
