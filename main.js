@@ -494,13 +494,19 @@ ipcMain.handle('get-books', async () => {
       return [];
     }
 
-    // Clean book.json to remove any existing readingProgress fields
-    cleanBookJson();
-
-    // Migrate absolute paths to relative paths
-    migrateBookPaths();
-
+    // Only clean and migrate on first load or when needed
+    // These operations are expensive and don't need to run every time
     const bookJsonPath = getBookDataPath();
+    const bookJsonStats = fs.existsSync(bookJsonPath) ? fs.statSync(bookJsonPath) : null;
+    const lastCleanTime = bookJsonStats ? bookJsonStats.mtime.getTime() : 0;
+    const now = Date.now();
+
+    // Only clean and migrate if book.json is older than 1 hour or doesn't exist
+    if (now - lastCleanTime > 3600000 || !bookJsonStats) {
+      console.log('Performing maintenance operations on book.json');
+      cleanBookJson();
+      migrateBookPaths();
+    }
 
     // Check if book.json exists
     if (!fs.existsSync(bookJsonPath)) {
@@ -522,7 +528,8 @@ ipcMain.handle('get-books', async () => {
 
       if (parsedData.books && Array.isArray(parsedData.books)) {
                 // Load progress from cache files for each book and update file paths
-        const booksWithProgress = await Promise.all(parsedData.books.map(async (book) => {
+        // Use Promise.allSettled to avoid one failed book blocking others
+        const booksWithProgress = await Promise.allSettled(parsedData.books.map(async (book) => {
           // Build absolute file path from relative path
           const currentBookDir = localSettings.webdavFolderPath || path.join(__dirname, 'book');
           // Use filePath if it's a relative path, otherwise fallback to fileName
@@ -535,30 +542,43 @@ ipcMain.handle('get-books', async () => {
             return null; // Return null for non-existent files
           }
 
-          const cacheData = await loadBookProgressFromCache(book.id);
-          if (cacheData) {
+          try {
+            const cacheData = await loadBookProgressFromCache(book.id);
+            if (cacheData) {
+              return {
+                ...book,
+                filePath: updatedFilePath, // Return absolute path for reading
+                readingProgress: {
+                  progress: Math.round(cacheData.progress * 100) / 100, // 精确到小数点后2位
+                  lastReadAt: cacheData.lastReadAt,
+                  readingTime: cacheData.readingTime
+                },
+                bookmarks: cacheData.bookmarks || []
+              };
+            }
+            // If no cache data, return book without readingProgress
             return {
               ...book,
               filePath: updatedFilePath, // Return absolute path for reading
-              readingProgress: {
-                progress: Math.round(cacheData.progress * 100) / 100, // 精确到小数点后2位
-                lastReadAt: cacheData.lastReadAt,
-                readingTime: cacheData.readingTime
-              },
-              bookmarks: cacheData.bookmarks || []
+              readingProgress: undefined,
+              bookmarks: []
+            };
+          } catch (error) {
+            console.error(`Error loading progress for book ${book.id}:`, error);
+            // Return book without progress if cache loading fails
+            return {
+              ...book,
+              filePath: updatedFilePath,
+              readingProgress: undefined,
+              bookmarks: []
             };
           }
-          // If no cache data, return book without readingProgress
-          return {
-            ...book,
-            filePath: updatedFilePath, // Return absolute path for reading
-            readingProgress: undefined,
-            bookmarks: []
-          };
         }));
 
-        // Filter out null values (books with missing files)
-        const validBooks = booksWithProgress.filter(book => book !== null);
+        // Filter out null values and extract successful results
+        const validBooks = booksWithProgress
+          .filter(result => result.status === 'fulfilled' && result.value !== null)
+          .map(result => result.value);
 
         console.log('Returning books with progress from cache:', validBooks);
         return validBooks;

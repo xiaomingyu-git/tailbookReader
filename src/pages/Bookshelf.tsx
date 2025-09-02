@@ -72,8 +72,14 @@ const Bookshelf: React.FC = () => {
 
 
   useEffect(() => {
-    loadLocalSettings();
-    loadBooks();
+    const initializeBookshelf = async () => {
+      // Load local settings first
+      await loadLocalSettings();
+      // Then load books
+      await loadBooks();
+    };
+
+    initializeBookshelf();
   }, []);
 
   // Load WebDAV config after local settings are loaded
@@ -421,10 +427,19 @@ const Bookshelf: React.FC = () => {
 
 
   return (
-    <div style={{
-      padding: '20px',
-      minHeight: 'calc(100vh - 80px)'
-    }}>
+    <>
+      {/* CSS Animations */}
+      <style>{`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
+
+      <div style={{
+        padding: '20px',
+        minHeight: 'calc(100vh - 80px)'
+      }}>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -541,7 +556,27 @@ const Bookshelf: React.FC = () => {
           padding: '50px',
           color: '#666'
         }}>
-          正在加载书籍...
+          <div style={{
+            fontSize: '18px',
+            marginBottom: '20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '10px'
+          }}>
+            <div style={{
+              width: '20px',
+              height: '20px',
+              border: '2px solid #e5e7eb',
+              borderTop: '2px solid #4a90e2',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite'
+            }}></div>
+            正在加载书籍...
+          </div>
+          <div style={{ fontSize: '14px', color: '#999' }}>
+            正在读取本地设置和书籍列表
+          </div>
         </div>
       ) : books.length === 0 ? (
         <div style={{
@@ -1511,7 +1546,8 @@ const Bookshelf: React.FC = () => {
           `}</style>
         </>
       )}
-    </div>
+      </div>
+    </>
   );
 };
 
