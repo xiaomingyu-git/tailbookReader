@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Book management functions
   openBookDialog: () => ipcRenderer.invoke('open-book-dialog'),
   copyBookToLibrary: (sourcePath) => ipcRenderer.invoke('copy-book-to-library', sourcePath),
+  // Drag and drop import support (renderer will call this with file path)
   getBooks: () => ipcRenderer.invoke('get-books'),
   readBookContent: (bookPath) => ipcRenderer.invoke('read-book-content', bookPath),
   deleteBook: (bookId) => ipcRenderer.invoke('delete-book', bookId),
@@ -28,5 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLocalSettings: () => ipcRenderer.invoke('get-local-settings'),
   saveLocalSettings: (settings) => ipcRenderer.invoke('save-local-settings', settings),
   selectWebDAVFolder: () => ipcRenderer.invoke('select-webdav-folder'),
-  saveWebDAVConfig: (config) => ipcRenderer.invoke('save-webdav-config', config)
+  saveWebDAVConfig: (config) => ipcRenderer.invoke('save-webdav-config', config),
+
+  // TXT import by content (for drag-and-drop without relying on original path)
+  importTxtContent: (fileName, content) => ipcRenderer.invoke('import-txt-content', fileName, content)
 });

@@ -55,13 +55,39 @@ const Reading: React.FC = () => {
   const [pages, setPages] = useState<string[]>([]);
   const [totalPages, setTotalPages] = useState(1);
   const [showTableOfContents, setShowTableOfContents] = useState(false);
-  const [tableOfContents, setTableOfContents] = useState<{title: string, page: number}[]>([]);
+  const [tableOfContents, setTableOfContents] = useState<{title: string, page: number, offset: number, byteOffset: number}[]>([]);
+  const [pageStartOffsets, setPageStartOffsets] = useState<number[]>([]);
+  const [pageStartByteOffsets, setPageStartByteOffsets] = useState<number[]>([]);
+  const [anchorOffset, setAnchorOffset] = useState<number | null>(null);
+  const [anchorByteOffset, setAnchorByteOffset] = useState<number | null>(null);
+  const [totalByteLength, setTotalByteLength] = useState<number>(0);
+  const [contentHash, setContentHash] = useState<string>('');
+  const lastAlignSignatureRef = useRef<string>('');
+  const isRestoringRef = useRef<boolean>(false);
+  const resizeInProgressRef = useRef<boolean>(false);
+
+  const computeContentHash = async (text: string) => {
+    try {
+      const enc = new TextEncoder();
+      const bytes = enc.encode(text);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      setContentHash(hashHex);
+      return hashHex;
+    } catch (e) {
+      console.warn('Failed to compute content hash:', e);
+      setContentHash('');
+      return '';
+    }
+  };
   const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [readingProgress, setReadingProgress] = useState(0);
   const [preloadedProgress, setPreloadedProgress] = useState<number | null>(null);
   const [showToolbar, setShowToolbar] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const progressBarRef = useRef<HTMLDivElement>(null);
+  // const measureRef = useRef<HTMLDivElement>(null);
   const [progressFilePath, setProgressFilePath] = useState<string>('');
   const [settingsFilePath, setSettingsFilePath] = useState<string>('');
   const [startTime, setStartTime] = useState<Date>(new Date());
@@ -166,6 +192,7 @@ const Reading: React.FC = () => {
     let resizeTimeout: NodeJS.Timeout;
 
     const handleResize = () => {
+      resizeInProgressRef.current = true;
       // Clear the previous timeout
       if (resizeTimeout) {
         clearTimeout(resizeTimeout);
@@ -173,8 +200,17 @@ const Reading: React.FC = () => {
 
       // Set a new timeout to update window size after resize stops
       resizeTimeout = setTimeout(() => {
+        // Capture both byte and char anchors of current first visible line
+        if (pageStartOffsets && pageStartOffsets.length >= currentPage) {
+          setAnchorOffset(pageStartOffsets[currentPage - 1]);
+        }
+        if (pageStartByteOffsets && pageStartByteOffsets.length >= currentPage) {
+          setAnchorByteOffset(pageStartByteOffsets[currentPage - 1]);
+        }
         setWindowSize({ width: window.innerWidth, height: window.innerHeight });
-      }, 300); // 300ms debounce
+        // end of resize
+        resizeInProgressRef.current = false;
+      }, 250); // slightly tighter debounce to reduce perceived lag
     };
 
     window.addEventListener('resize', handleResize);
@@ -189,20 +225,91 @@ const Reading: React.FC = () => {
   // Update reading progress when current page changes
   useEffect(() => {
     if (totalPages > 0) {
-      setReadingProgress((currentPage - 1) / totalPages);
+      // Progress strictly by byte offsets
+      if (pageStartByteOffsets && pageStartByteOffsets.length > 0 && currentPage >= 1 && currentPage <= pageStartByteOffsets.length) {
+        const currentByte = pageStartByteOffsets[currentPage - 1];
+        const denom = Math.max(1, totalByteLength - 1);
+        setReadingProgress(Math.min(1, Math.max(0, currentByte / denom)));
+        setAnchorByteOffset(currentByte);
+      }
+
+      // Keep character anchors as secondary
+      if (pageStartOffsets && pageStartOffsets.length >= currentPage) {
+        setAnchorOffset(pageStartOffsets[currentPage - 1]);
+      }
     }
-  }, [currentPage, totalPages]);
+  }, [currentPage, totalPages, pageStartByteOffsets, totalByteLength]);
+
+  // Align page after pagination when anchor arrives later than content (skip while resizing)
+  useEffect(() => {
+    if (resizeInProgressRef.current) return;
+    // Build an alignment signature to prevent repeated setCurrentPage loops
+    const sig = JSON.stringify({
+      a: anchorByteOffset ?? anchorOffset ?? -1,
+      p: pageStartByteOffsets.length || pageStartOffsets.length,
+      t: totalPages
+    });
+    if (lastAlignSignatureRef.current === sig) return;
+
+    // Prefer byte anchor
+    if (anchorByteOffset !== null && pageStartByteOffsets.length > 0 && totalPages > 0) {
+      const idx = (() => {
+        for (let i = pageStartByteOffsets.length - 1; i >= 0; i--) {
+          if (pageStartByteOffsets[i] <= anchorByteOffset) return i;
+        }
+        return 0;
+      })();
+      const target = Math.max(1, Math.min(totalPages, idx + 1));
+      if (target !== currentPage) {
+        setCurrentPage(target);
+      }
+      // Once we align from a restore, clear restoring flag to avoid later re-alignments overriding user nav
+      if (isRestoringRef.current) isRestoringRef.current = false;
+      lastAlignSignatureRef.current = sig;
+      return;
+    }
+    // Fallback to character anchor
+    if (anchorOffset !== null && pageStartOffsets.length > 0 && totalPages > 0) {
+      const idx = (() => {
+        for (let i = pageStartOffsets.length - 1; i >= 0; i--) {
+          if (pageStartOffsets[i] <= anchorOffset) return i;
+        }
+        return 0;
+      })();
+      const target = Math.max(1, Math.min(totalPages, idx + 1));
+      if (target !== currentPage) {
+        setCurrentPage(target);
+      }
+      if (isRestoringRef.current) isRestoringRef.current = false;
+      lastAlignSignatureRef.current = sig;
+    }
+  }, [anchorByteOffset, pageStartByteOffsets, anchorOffset, pageStartOffsets, totalPages]);
 
   useEffect(() => {
-    if (content) {
-      paginateContent(content);
-    } else if (!loading) {
-      // If no content and not loading, set default page
-      setPages(['暂无内容']);
-      setTotalPages(1);
-      setCurrentPage(1);
+    if (!content) {
+      if (!loading) {
+        setPages(['暂无内容']);
+        setTotalPages(1);
+        setCurrentPage(1);
+      }
+      return;
     }
-  }, [content, fontSize, windowSize, paddingTop, paddingBottom, paddingLeft, paddingRight]);
+    // Avoid re-entrant pagination loops by comparing a simple signature
+    const sig = JSON.stringify({
+      len: content.length,
+      fs: fontSize,
+      lh: lineHeight,
+      w: windowSize.width,
+      h: windowSize.height,
+      pt: paddingTop,
+      pb: paddingBottom,
+      pl: paddingLeft,
+      pr: paddingRight
+    });
+    if ((paginateContent as any)._lastSig === sig) return;
+    (paginateContent as any)._lastSig = sig;
+    paginateContent(content);
+  }, [content, fontSize, lineHeight, windowSize, paddingTop, paddingBottom, paddingLeft, paddingRight, loading]);
 
   // Apply preloaded progress after pagination is complete
   useEffect(() => {
@@ -433,8 +540,33 @@ const Reading: React.FC = () => {
     try {
       // Use targetPage if provided, otherwise use currentPage
       const pageToSave = targetPage || currentPage;
-      // Calculate progress percentage with 2 decimal places
-      const progressPercentage = totalPages > 0 ? Math.round(((pageToSave - 1) / totalPages) * 10000) / 100 : 0;
+      // Progress now based on byte offsets rather than page/percentage; retain percentage for UI only
+      const progressPercentage = (() => {
+        if (pageStartByteOffsets && pageStartByteOffsets.length >= pageToSave && totalByteLength > 0) {
+          const currentByte = pageStartByteOffsets[pageToSave - 1];
+          return Math.round((currentByte / Math.max(1, totalByteLength - 1)) * 10000) / 100;
+        }
+        return totalPages > 0 ? Math.round(((pageToSave - 1) / totalPages) * 10000) / 100 : 0;
+      })();
+
+      // Determine precise anchor offset for the first visible line on this page
+      let anchor = anchorOffset;
+      let anchorByte = anchorByteOffset;
+      if (pageStartOffsets && pageStartOffsets.length >= pageToSave) {
+        anchor = pageStartOffsets[pageToSave - 1];
+      }
+      if (pageStartByteOffsets && pageStartByteOffsets.length >= pageToSave) {
+        anchorByte = pageStartByteOffsets[pageToSave - 1];
+      }
+
+      // Kindle-like location (every 128 bytes)
+      const location = (() => {
+        if (pageStartByteOffsets && pageStartByteOffsets.length >= pageToSave && totalByteLength > 0) {
+          const currentByte = pageStartByteOffsets[pageToSave - 1];
+          return Math.floor(currentByte / 128);
+        }
+        return undefined;
+      })();
 
       // Prepare progress data
       const progressData = {
@@ -445,7 +577,12 @@ const Reading: React.FC = () => {
         lastReadAt: new Date().toISOString(),
         readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
         bookmarks: book.bookmarks || [],
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
+        anchorOffset: typeof anchor === 'number' ? anchor : undefined,
+        anchorByteOffset: typeof anchorByte === 'number' ? anchorByte : undefined,
+        totalByteLength: totalByteLength || undefined,
+        contentHash: contentHash || undefined,
+        location: typeof location === 'number' ? location : undefined
       };
 
       // Save to cache file
@@ -467,8 +604,29 @@ const Reading: React.FC = () => {
     if (!book) return;
 
     try {
-      // Calculate target page from progress percentage
-      const targetPage = Math.max(1, Math.min(totalPages, Math.round((progressPercentage / 100) * totalPages) + 1));
+      // Calculate target page from current byte anchor if available; fallback to percentage
+      let targetPage = currentPage;
+      if (pageStartByteOffsets && pageStartByteOffsets.length > 0 && typeof anchorByteOffset === 'number') {
+        const idx = (() => {
+          for (let i = pageStartByteOffsets.length - 1; i >= 0; i--) {
+            if (pageStartByteOffsets[i] <= anchorByteOffset) return i;
+          }
+          return 0;
+        })();
+        targetPage = idx + 1;
+      } else {
+        targetPage = Math.max(1, Math.min(totalPages, Math.round((progressPercentage / 100) * totalPages) + 1));
+      }
+
+      // Determine precise anchor offset for the first visible line on this page
+      let anchor = anchorOffset;
+      let anchorByte = anchorByteOffset;
+      if (pageStartOffsets && pageStartOffsets.length >= targetPage) {
+        anchor = pageStartOffsets[targetPage - 1];
+      }
+      if (pageStartByteOffsets && pageStartByteOffsets.length >= targetPage) {
+        anchorByte = pageStartByteOffsets[targetPage - 1];
+      }
 
       // Prepare progress data
       const progressData = {
@@ -479,7 +637,9 @@ const Reading: React.FC = () => {
         lastReadAt: new Date().toISOString(),
         readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
         bookmarks: book.bookmarks || [],
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
+        anchorOffset: typeof anchor === 'number' ? anchor : undefined,
+        anchorByteOffset: typeof anchorByte === 'number' ? anchorByte : undefined
       };
 
       // Save to cache file
@@ -499,7 +659,7 @@ const Reading: React.FC = () => {
 
 
   // Load reading progress immediately after content is loaded (before pagination)
-  const loadReadingProgressImmediate = async (bookId: string) => {
+  const loadReadingProgressImmediate = async (bookId: string, rawText?: string) => {
     if (isBookmarkJumping) return;
 
     try {
@@ -510,21 +670,43 @@ const Reading: React.FC = () => {
 
         if (result.success && result.data) {
           const progressData = result.data;
-          const { progress, readingTime } = progressData;
-          console.log('进度数据:', { progress, readingTime });
+          const { progress, readingTime, anchorOffset: savedAnchorOffset, anchorByteOffset: savedAnchorByteOffset } = progressData;
+          console.log('进度数据:', { progress, readingTime, anchorOffset: savedAnchorOffset, anchorByteOffset: savedAnchorByteOffset });
 
-          // Store progress data for later use after pagination
-          if (progress > 0) {
-            // Update reading time immediately
-            if (readingTime > 0) {
-              const newStartTime = new Date();
-              newStartTime.setMinutes(newStartTime.getMinutes() - readingTime);
-              setStartTime(newStartTime);
+          // Update reading time immediately
+          if (readingTime > 0) {
+            const newStartTime = new Date();
+            newStartTime.setMinutes(newStartTime.getMinutes() - readingTime);
+            setStartTime(newStartTime);
+          }
+
+          // Prefer precise anchor offset if available; fallback to percentage
+          if (typeof savedAnchorByteOffset === 'number' && savedAnchorByteOffset >= 0) {
+            setAnchorByteOffset(savedAnchorByteOffset);
+            isRestoringRef.current = true;
+            console.log(`预加载字节锚点: ${savedAnchorByteOffset}，等待分页对齐`);
+          } else if (typeof savedAnchorOffset === 'number' && savedAnchorOffset >= 0) {
+            setAnchorOffset(savedAnchorOffset);
+            isRestoringRef.current = true;
+            console.log(`预加载锚点偏移: ${savedAnchorOffset}，等待分页对齐`);
+          } else if (progress > 0) {
+            // Convert percent to byte anchor using provided rawText if available
+            if (rawText) {
+              try {
+                const encoder = new TextEncoder();
+                const totalBytes = encoder.encode(rawText).length;
+                const byteAnchor = Math.max(0, Math.min(totalBytes - 1, Math.round((progress / 100) * (Math.max(1, totalBytes - 1)))));
+                setAnchorByteOffset(byteAnchor);
+                isRestoringRef.current = true;
+                console.log(`由百分比推算字节锚点: ${byteAnchor}/${totalBytes}`);
+              } catch (e) {
+                setPreloadedProgress(progress / 100);
+                console.log(`预加载阅读进度: ${progress.toFixed(2)}%，等待分页完成后应用`);
+              }
+            } else {
+              setPreloadedProgress(progress / 100);
+              console.log(`预加载阅读进度: ${progress.toFixed(2)}%，等待分页完成后应用`);
             }
-
-            // Store preloaded progress for later application after pagination
-            setPreloadedProgress(progress / 100);
-            console.log(`预加载阅读进度: ${progress.toFixed(2)}%，等待分页完成后应用`);
           } else {
             console.log('未找到有效阅读进度，从第1页开始');
           }
@@ -649,35 +831,54 @@ const Reading: React.FC = () => {
   const paginateContent = (text: string) => {
     try {
       // Calculate available reading area based on actual window size and padding
-      const readingAreaHeight = windowSize.height - paddingTop - paddingBottom; // Full screen height minus top and bottom padding
+      const readingAreaHeightRaw = windowSize.height - paddingTop - paddingBottom; // Full screen height minus top and bottom padding
       const readingAreaWidth = windowSize.width - paddingLeft - paddingRight; // Full screen width minus left and right padding
 
       // Split content into paragraphs, keeping empty lines as separators
       const paragraphs = text.split('\n');
+      // Compute total byte length once (UTF-8)
+      const encoder = new TextEncoder();
+      setTotalByteLength(encoder.encode(text).length);
 
       // Estimate lines per page based on total line height from settings (in px)
       const actualLineHeight = lineHeight;
-      const linesPerPage = Math.max(3, Math.floor(readingAreaHeight / actualLineHeight));
+      const snappedHeight = Math.max(
+        actualLineHeight,
+        Math.floor(Math.max(0, readingAreaHeightRaw) / Math.max(1, actualLineHeight)) * Math.max(1, actualLineHeight)
+      );
+      const linesPerPage = Math.max(3, Math.floor(snappedHeight / actualLineHeight));
 
-      // Estimate characters per line based on actual width and font
-      // Different fonts have different character widths, adjust multiplier accordingly
-      const charWidthMultiplier = fontFamily.includes('monospace') ? 0.6 :
-                                 fontFamily.includes('serif') ? 0.55 : 0.6;
-      const charsPerLine = Math.floor(readingAreaWidth / (fontSize * charWidthMultiplier));
+      // Precise page splitting by measuring real rendered height using an offscreen measurer
+      // Build a hidden measurer div with the same style
+      const measurer = document.createElement('div');
+      measurer.style.position = 'absolute';
+      measurer.style.visibility = 'hidden';
+      measurer.style.pointerEvents = 'none';
+      measurer.style.top = '0';
+      measurer.style.left = '0';
+      measurer.style.width = `${Math.max(0, readingAreaWidth)}px`;
+      measurer.style.fontSize = `${fontSize}px`;
+      measurer.style.lineHeight = `${lineHeight}px`;
+      measurer.style.fontFamily = fontFamily;
+      measurer.style.whiteSpace = 'pre-wrap';
+      measurer.style.wordBreak = 'break-word';
+      measurer.style.boxSizing = 'border-box';
+      measurer.style.padding = '0';
+      measurer.style.margin = '0';
+      document.body.appendChild(measurer);
 
       // Debug logging
       console.log('分页计算参数:', {
         windowHeight: windowSize.height,
         windowWidth: windowSize.width,
-        readingAreaHeight,
+        readingAreaHeight: readingAreaHeightRaw,
+        snappedHeight,
         readingAreaWidth,
         fontSize,
         lineHeight,
         actualLineHeight,
         linesPerPage,
-        charsPerLine,
         fontFamily,
-        charWidthMultiplier,
         paddingTop,
         paddingBottom,
         paddingLeft,
@@ -687,36 +888,136 @@ const Reading: React.FC = () => {
       });
 
       const newPages: string[] = [];
-      const toc: {title: string, page: number}[] = [];
+      const toc: {title: string, page: number, offset: number, byteOffset: number}[] = [];
+      const pageOffsets: number[] = [];
+      const pageByteOffsets: number[] = [];
       let currentPageContent = '';
       let currentLines = 0;
+      let currentPageStartOffset = 0;
+      let cumulativeOffset = 0; // character offset in original text
+      let currentPageStartByteOffset = 0;
+      let cumulativeByteOffset = 0; // byte offset in original UTF-8 text
 
-      for (const paragraph of paragraphs) {
-        // Check if this is a potential chapter title (starts with "第" and contains "章" or starts with "Chapter")
-        if (/^第\S*章/.test(paragraph.trim()) || /^Chapter\s+\d+/i.test(paragraph.trim())) {
-          toc.push({
-            title: paragraph.trim(),
-            page: newPages.length + 1
-          });
+      // Helper: detect chapter title and return a suitable TOC title
+      const matchChapterTitle = (line: string): string | null => {
+        const s = line.trim();
+        if (!s) return null;
+        if (s.length > 60) return null; // avoid overly long lines
+
+        // Strip surrounding brackets for detection (keep original for title if needed)
+        const unbracketed = s.replace(/^[\[【\(（《「『\s]+/, '').replace(/[\]】\)）》」』\s]+$/, '');
+
+        // 1) Chinese classic: 第X章/节/卷/部/篇/回/集/话
+        if (/^第[一二三四五六七八九十百千万两〇0-9]+[章节卷部篇回集话]/.test(unbracketed)) {
+          return s;
         }
 
-        // Calculate actual lines this paragraph will take
-        const paragraphLines = paragraph.trim() === '' ? 1 : Math.max(1, Math.ceil(paragraph.length / charsPerLine));
+        // 2) Arabic numbered headings: 1. / 1、 / 1) / 1-1 / 1.1 etc., followed by some text
+        if (/^\d+(?:[\.．、\-]\d+)*[\s\.．、\)）:：]+\S/.test(unbracketed)) {
+          return s;
+        }
 
-                // If adding this paragraph would exceed page limits, start a new page
-        if (currentLines + paragraphLines > linesPerPage && currentPageContent.length > 0) {
-          newPages.push(currentPageContent.trim());
+        // 3) Chinese numeral headings like "一、..." or "一 标题" (must have delimiter)
+        const mCn = unbracketed.match(/^([一二三四五六七八九十百千]+)(?:、|\s+)\S+/);
+        if (mCn) {
+          // For pure Chinese numerals, return up to first space or keep delimiter block
+          const mTitle = unbracketed.match(/^([一二三四五六七八九十百千]+(?:、|\s+)[^\s]+)/);
+          return mTitle ? mTitle[1] : s;
+        }
+
+        // 4) Roman numerals I, II, ... with delimiter and text
+        if (/^[IVXLCDM]+(?:\.|、|\s+)\S+/i.test(unbracketed)) {
+          return s;
+        }
+
+        // 5) English chapter keywords
+        if (/^(?:Chapter|CHAPTER|Ch\.|Section|Part)\s+[0-9ivxlcdm]+/i.test(unbracketed)) {
+          return s;
+        }
+
+        if (/^(?:Prologue|Epilogue|Preface|Foreword|Acknowledgments?)\b/i.test(unbracketed)) {
+          return s;
+        }
+
+        // 6) Chinese keywords
+        if (/^(?:序章|序|前言|楔子|引子|目录|致谢|后记|尾声|番外|卷[一二三四五六七八九十百千万两〇0-9IVXLCDM]+|第[一二三四五六七八九十百千万两〇0-9]+卷)/i.test(unbracketed)) {
+          return s;
+        }
+
+        return null;
+      };
+
+      for (const paragraph of paragraphs) {
+        const paragraphStartOffset = cumulativeOffset;
+        const paragraphStartByteOffset = cumulativeByteOffset;
+        // Check if this is a potential chapter title
+        const trimmed = paragraph.trim();
+        let chapterTitle: string | null = null;
+
+        // Rule 1: Starts with "第" and contains "章" OR starts with "Chapter <num>"
+        chapterTitle = matchChapterTitle(trimmed);
+
+        // Calculate actual lines this paragraph will take
+        // Measure rendered height of paragraph if needed
+        const textToMeasure = paragraph === '' ? '\n' : paragraph + '\n';
+        measurer.textContent = textToMeasure;
+        const paraHeight = measurer.getBoundingClientRect().height;
+        const paragraphLines = Math.max(1, Math.round(paraHeight / Math.max(1, actualLineHeight)));
+
+        // If this paragraph is a chapter heading, force a page break BEFORE it
+        if (chapterTitle) {
+          if (currentPageContent.trim()) {
+            newPages.push(currentPageContent.trim());
+            pageOffsets.push(currentPageStartOffset);
+            pageByteOffsets.push(currentPageStartByteOffset);
+            currentPageContent = '';
+            currentLines = 0;
+          }
+          // This chapter starts a new page
+          toc.push({
+            title: chapterTitle,
+            page: newPages.length + 1,
+            offset: paragraphStartOffset,
+            byteOffset: paragraphStartByteOffset
+          });
+          currentPageStartOffset = paragraphStartOffset;
+          currentPageStartByteOffset = paragraphStartByteOffset;
           currentPageContent = paragraph + '\n';
           currentLines = paragraphLines;
+          // Advance cumulative offsets (including original newline) in both char and byte metrics
+          cumulativeOffset += paragraph.length + 1;
+          cumulativeByteOffset += encoder.encode(paragraph + '\n').length;
+          continue;
+        }
+
+        // Normal pagination logic
+        if (currentLines + paragraphLines > linesPerPage && currentPageContent.length > 0) {
+          newPages.push(currentPageContent.trim());
+          pageOffsets.push(currentPageStartOffset);
+          pageByteOffsets.push(currentPageStartByteOffset);
+          currentPageContent = paragraph + '\n';
+          currentLines = paragraphLines;
+          currentPageStartOffset = paragraphStartOffset;
+          currentPageStartByteOffset = paragraphStartByteOffset;
         } else {
           currentPageContent += paragraph + '\n';
           currentLines += paragraphLines;
         }
+        // Advance cumulative offsets (including original newline)
+        cumulativeOffset += paragraph.length + 1;
+        cumulativeByteOffset += encoder.encode(paragraph + '\n').length;
       }
 
       // Add the last page if it has content
       if (currentPageContent.trim()) {
         newPages.push(currentPageContent);
+        pageOffsets.push(currentPageStartOffset);
+        pageByteOffsets.push(currentPageStartByteOffset);
+      }
+
+      // Cleanup measurer
+      if (measurer.parentNode) {
+        measurer.parentNode.removeChild(measurer);
       }
 
       // Ensure we have at least one page
@@ -729,6 +1030,34 @@ const Reading: React.FC = () => {
       setPages(newPages);
       setTotalPages(newPages.length);
       setTableOfContents(toc);
+      setPageStartOffsets(pageOffsets);
+      setPageStartByteOffsets(pageByteOffsets);
+
+      // If we have an anchorByteOffset captured (e.g., from saved progress or before resize),
+      // re-align to the page whose start byte offset is the nearest not greater than anchorByteOffset.
+      if (anchorByteOffset !== null && pageByteOffsets.length > 0) {
+        const pageIndexByByte = (() => {
+          for (let i = pageByteOffsets.length - 1; i >= 0; i--) {
+            if (pageByteOffsets[i] <= anchorByteOffset) return i;
+          }
+          return 0;
+        })();
+        const targetPageByByte = pageIndexByByte + 1;
+        if (targetPageByByte !== currentPage) {
+          setCurrentPage(targetPageByByte);
+        }
+      } else if (anchorOffset !== null && pageOffsets.length > 0) {
+        const pageIndex = (() => {
+          for (let i = pageOffsets.length - 1; i >= 0; i--) {
+            if (pageOffsets[i] <= anchorOffset) return i;
+          }
+          return 0;
+        })();
+        const targetPage = pageIndex + 1;
+        if (targetPage !== currentPage) {
+          setCurrentPage(targetPage);
+        }
+      }
 
       console.log('分页完成:', {
         totalPages: newPages.length,
@@ -736,13 +1065,9 @@ const Reading: React.FC = () => {
         currentPage
       });
 
-      // Set initial page after pagination
+      // Set initial page only for first pagination; subsequent realignment uses byte/char anchors
       if (newPages.length > 0) {
-        if (previousTotalPages > 0) {
-          // Preserve existing progress when repaginating
-          const targetPage = Math.max(1, Math.min(newPages.length, Math.round(readingProgress * newPages.length) + 1));
-          setCurrentPage(targetPage);
-        } else {
+        if (previousTotalPages === 0 && !isRestoringRef.current) {
           setCurrentPage(1);
         }
       } else {
@@ -804,6 +1129,7 @@ const Reading: React.FC = () => {
           try {
             const bookContent = await window.electronAPI.readBookContent(selectedBook.filePath);
             setContent(bookContent.content);
+            await computeContentHash(bookContent.content);
 
             // Show encoding info in console for debugging
             if (bookContent.encoding) {
@@ -820,7 +1146,7 @@ const Reading: React.FC = () => {
             }
 
             // Load reading progress immediately after content is set
-            await loadReadingProgressImmediate(selectedBook.id);
+            await loadReadingProgressImmediate(selectedBook.id, bookContent.content);
           } catch (readError) {
             console.error('读取书籍内容失败:', readError);
             const errorMessage = readError instanceof Error ? readError.message : String(readError);
@@ -927,7 +1253,8 @@ const Reading: React.FC = () => {
               lineHeight: `${lineHeight}px`,
               fontFamily: fontFamily,
               color: '#333',
-              whiteSpace: 'pre-line',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
               textAlign: 'left',
               overflow: 'hidden',
               boxSizing: 'border-box'
@@ -1940,13 +2267,23 @@ const Reading: React.FC = () => {
                             transition: 'all 0.2s ease'
                           }}
                         onClick={() => {
-                          // Calculate progress percentage based on chapter page
-                          const chapterProgress = totalPages > 0 ? Math.round(((item.page - 1) / totalPages) * 100) : 0;
-                          const targetPage = Math.max(1, Math.min(totalPages, Math.round((chapterProgress / 100) * totalPages) + 1));
+                          // Recompute target page for this chapter by matching its character offset
+                          // against current pageStartOffsets to adapt to dynamic layout changes
+                          let targetPage = item.page;
+                          if (pageStartOffsets && pageStartOffsets.length > 0) {
+                            // Find the largest page index whose start offset <= chapter offset
+                            const idx = pageStartOffsets.findIndex((start, i) => {
+                              const nextStart = pageStartOffsets[i + 1] ?? Number.POSITIVE_INFINITY;
+                              return start <= item.offset && item.offset < nextStart;
+                            });
+                            if (idx >= 0) {
+                              targetPage = idx + 1;
+                            }
+                          }
+                          targetPage = Math.max(1, Math.min(totalPages, targetPage));
                           setCurrentPage(targetPage);
                           setShowTableOfContents(false);
-                          // Save reading progress after jumping to chapter
-                          saveReadingProgress();
+                          saveReadingProgress(targetPage);
                         }}
                       >
                         <div style={{ fontSize: '14px', marginBottom: '4px' }}>

@@ -10,6 +10,37 @@ const { createClient } = require('webdav');
 console.log('EPUB2 library imported successfully');
 const isDev = process.env.NODE_ENV === 'development';
 
+// Ensure local-settings.json exists at startup
+function getDefaultLocalSettings() {
+  return {
+    webdavFolderPath: null,
+    isFirstRun: true,
+    webdavConfig: {
+      webdavPath: '',
+      username: '',
+      password: ''
+    },
+    lastUpdated: new Date().toISOString()
+  };
+}
+
+function ensureLocalSettingsFileExists() {
+  try {
+    const settingsPath = getLocalSettingsPath();
+    if (!fs.existsSync(settingsPath)) {
+      const defaults = getDefaultLocalSettings();
+      const dir = path.dirname(settingsPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(settingsPath, JSON.stringify(defaults, null, 2));
+      console.log('Created default local-settings.json');
+    }
+  } catch (error) {
+    console.error('Failed to ensure local-settings.json exists:', error);
+  }
+}
+
 // Helper function to get cache file path for a book
 function getBookCachePath(bookId) {
   const localSettings = loadLocalSettings();
@@ -63,7 +94,13 @@ function getWebDAVConfig() {
 
 // Helper function to get local settings file path
 function getLocalSettingsPath() {
-  return path.join(__dirname, 'local-settings.json');
+  try {
+    const userDataDir = app.getPath('userData');
+    return path.join(userDataDir, 'local-settings.json');
+  } catch (e) {
+    // Fallback to app directory in dev
+    return path.join(__dirname, 'local-settings.json');
+  }
 }
 
 // Helper function to load local settings
@@ -72,21 +109,20 @@ function loadLocalSettings() {
     const settingsPath = getLocalSettingsPath();
     if (fs.existsSync(settingsPath)) {
       const data = fs.readFileSync(settingsPath, 'utf8');
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      // Auto-correct: if a folder path exists, ensure isFirstRun is false
+      if (parsed && parsed.webdavFolderPath && parsed.isFirstRun) {
+        parsed.isFirstRun = false;
+        try {
+          fs.writeFileSync(settingsPath, JSON.stringify(parsed, null, 2));
+        } catch (_) {}
+      }
+      return parsed;
     }
   } catch (error) {
     console.error('Failed to load local settings:', error);
   }
-  return {
-    webdavFolderPath: null,
-    isFirstRun: true,
-    webdavConfig: {
-      webdavPath: '',
-      username: '',
-      password: ''
-    },
-    lastUpdated: new Date().toISOString()
-  };
+  return getDefaultLocalSettings();
 }
 
 // Helper function to save local settings
@@ -94,6 +130,10 @@ function saveLocalSettings(settings) {
   try {
     const settingsPath = getLocalSettingsPath();
     settings.lastUpdated = new Date().toISOString();
+    const dir = path.dirname(settingsPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     console.log('Local settings saved:', settings);
   } catch (error) {
@@ -305,6 +345,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Ensure settings file exists as soon as the app is ready
+  ensureLocalSettingsFileExists();
   createWindow();
 
   app.on('activate', function () {
@@ -321,8 +363,7 @@ ipcMain.handle('open-book-dialog', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     filters: [
-      { name: 'eBooks', extensions: ['epub', 'pdf', 'txt', 'mobi'] },
-      { name: 'All Files', extensions: ['*'] }
+      { name: 'Text', extensions: ['txt'] }
     ]
   });
 
@@ -341,7 +382,24 @@ ipcMain.handle('select-webdav-folder', async () => {
   });
 
   if (!result.canceled && result.filePaths.length > 0) {
-    return result.filePaths[0];
+    try {
+      // Persist the selected folder path to local-settings.json immediately
+      const folderPath = result.filePaths[0];
+      // Ensure settings file exists before saving
+      ensureLocalSettingsFileExists();
+      const currentSettings = loadLocalSettings();
+      const updatedSettings = {
+        ...currentSettings,
+        webdavFolderPath: folderPath,
+        isFirstRun: false,
+        lastUpdated: new Date().toISOString()
+      };
+      saveLocalSettings(updatedSettings);
+      return folderPath;
+    } catch (e) {
+      console.error('Failed to save selected WebDAV folder to local settings:', e);
+      return result.filePaths[0];
+    }
   }
   return null;
 });
@@ -357,6 +415,13 @@ ipcMain.handle('copy-book-to-library', async (event, sourcePath) => {
     }
 
     const fileName = path.basename(sourcePath);
+    const ext = path.extname(fileName).toLowerCase();
+    if (ext !== '.txt') {
+      return {
+        success: false,
+        message: '仅支持导入TXT文本文件'
+      };
+    }
     const targetPath = path.join(bookDir, fileName);
 
     console.log('Target path:', targetPath);
@@ -377,41 +442,7 @@ ipcMain.handle('copy-book-to-library', async (event, sourcePath) => {
     let bookTitle = path.parse(fileName).name;
     let bookAuthor = undefined;
 
-    // Try to extract metadata from EPUB files
-                if (path.extname(fileName).toLowerCase() === '.epub') {
-        try {
-
-
-          console.log('Extracting EPUB metadata...');
-          const epub = new Epub(targetPath);
-
-          // Wait for EPUB to be ready
-          await new Promise((resolve, reject) => {
-            epub.on('end', resolve);
-            epub.on('error', reject);
-          });
-
-          // Extract title and author from metadata
-          if (epub.metadata) {
-            if (epub.metadata.title) {
-              bookTitle = epub.metadata.title;
-              console.log('Extracted title:', bookTitle);
-            }
-            if (epub.metadata.creator) {
-              bookAuthor = epub.metadata.creator;
-              console.log('Extracted author:', bookAuthor);
-            }
-          }
-
-          // Close the EPUB to free resources
-          if (epub.close) {
-            epub.close();
-          }
-        } catch (epubError) {
-          console.warn('Failed to extract EPUB metadata:', epubError);
-          // Fallback to filename
-        }
-      }
+    // TXT only; no metadata extraction
 
     const bookInfo = {
       id: uniqueId,
@@ -596,6 +627,70 @@ ipcMain.handle('get-books', async () => {
   } catch (error) {
     console.error('Error getting books:', error);
     return [];
+  }
+});
+
+// Import TXT content via renderer (drag-and-drop without original path)
+ipcMain.handle('import-txt-content', async (event, fileName, content) => {
+  try {
+    if (!fileName || typeof fileName !== 'string' || !fileName.toLowerCase().endsWith('.txt')) {
+      return { success: false, message: '文件名无效或不是TXT' };
+    }
+
+    const localSettings = loadLocalSettings();
+    const bookDir = localSettings.webdavFolderPath || path.join(__dirname, 'book');
+    if (!fs.existsSync(bookDir)) {
+      fs.mkdirSync(bookDir, { recursive: true });
+    }
+
+    const safeName = fileName.replace(/[\\/:*?"<>|]/g, '_');
+    const targetPath = path.join(bookDir, safeName);
+
+    // Write content directly
+    fs.writeFileSync(targetPath, content, 'utf8');
+
+    // Build book info
+    const stats = fs.statSync(targetPath);
+    const fileBase = path.basename(safeName);
+    const uniqueId = fileBase.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '').substring(0, 20);
+    const bookInfo = {
+      id: uniqueId,
+      title: path.parse(fileBase).name,
+      author: undefined,
+      fileName: fileBase,
+      filePath: fileBase,
+      size: stats.size,
+      addedAt: new Date().toISOString()
+    };
+
+    // Update book.json
+    const bookJsonPath = getBookDataPath();
+    let bookData = { books: [], lastUpdated: new Date().toISOString() };
+    try {
+      if (fs.existsSync(bookJsonPath)) {
+        const existingData = fs.readFileSync(bookJsonPath, 'utf8');
+        bookData = JSON.parse(existingData);
+      }
+    } catch {}
+
+    const existingByName = bookData.books.find(b => b.fileName === fileBase);
+    if (existingByName) {
+      return { success: false, message: `书籍 "${fileBase}" 已经导入过了`, existingBook: existingByName };
+    }
+
+    const idx = bookData.books.findIndex(b => b.id === uniqueId);
+    if (idx >= 0) {
+      bookData.books[idx] = bookInfo;
+    } else {
+      bookData.books.push(bookInfo);
+    }
+    bookData.lastUpdated = new Date().toISOString();
+    fs.writeFileSync(bookJsonPath, JSON.stringify(bookData, null, 2));
+
+    return { success: true, message: `书籍 "${fileBase}" 导入成功`, book: bookInfo };
+  } catch (error) {
+    console.error('Error importing TXT content:', error);
+    return { success: false, message: `导入失败: ${error.message}` };
   }
 });
 

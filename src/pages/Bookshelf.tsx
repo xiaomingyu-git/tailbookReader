@@ -47,6 +47,7 @@ declare global {
       saveLocalSettings: (settings: any) => Promise<{ success: boolean; message: string }>;
       selectWebDAVFolder: () => Promise<string | null>;
       saveWebDAVConfig: (config: any) => Promise<{ success: boolean; message: string }>;
+      importTxtContent: (fileName: string, content: string) => Promise<{ success: boolean; message: string; book?: Book; existingBook?: Book }>;
     };
   }
 }
@@ -67,6 +68,7 @@ const Bookshelf: React.FC = () => {
     username: '',
     password: ''
   });
+  const [isWebdavConfigDirty, setIsWebdavConfigDirty] = useState(false);
   const [showWebDAVFolderModal, setShowWebDAVFolderModal] = useState(false);
   const [webdavSaveTimeout, setWebdavSaveTimeout] = useState<NodeJS.Timeout | null>(null);
   const [showAutoSaveIndicator, setShowAutoSaveIndicator] = useState(false);
@@ -84,19 +86,27 @@ const Bookshelf: React.FC = () => {
     initializeBookshelf();
   }, []);
 
-  // Load WebDAV config after local settings are loaded
+  // Always load WebDAV config once on mount
   useEffect(() => {
-    if (localSettings.webdavFolderPath !== null) {
+    loadWebDAVConfig();
+  }, []);
+
+  // Load WebDAV config when opening the modal if the user hasn't edited fields
+  useEffect(() => {
+    if (showWebDAVConfig && !isWebdavConfigDirty) {
       loadWebDAVConfig();
     }
-  }, [localSettings]);
+  }, [showWebDAVConfig, isWebdavConfigDirty]);
 
   // Check for first run after local settings are loaded
   useEffect(() => {
-    if (localSettings.isFirstRun && !loading) {
+    // Only show on first run when no local storage path is configured yet
+    if (localSettings.isFirstRun && !localSettings.webdavFolderPath && !loading) {
       setShowFirstRunSetup(true);
+    } else {
+      setShowFirstRunSetup(false);
     }
-  }, [localSettings.isFirstRun, loading]);
+  }, [localSettings.isFirstRun, localSettings.webdavFolderPath, loading]);
 
   // Reload books when page becomes visible (e.g., returning from reading page)
   useEffect(() => {
@@ -224,6 +234,146 @@ const Bookshelf: React.FC = () => {
     }
   };
 
+  // Drag-and-drop TXT import
+  useEffect(() => {
+    const preventDefault = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = 'copy';
+        }
+      } catch {}
+    };
+
+    const handleDrop = async (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const dt = e.dataTransfer;
+        if (!dt || !dt.files || dt.files.length === 0) return;
+        if (!window.electronAPI) {
+          alert('此功能需要在Electron环境中运行');
+          return;
+        }
+
+        // Prefer path-based copy when available (Explorer -> Electron provides .path)
+        const pathImports: string[] = [];
+        const contentFiles: File[] = [];
+
+        for (const f of Array.from(dt.files)) {
+          const nameLower = (f.name || '').toLowerCase();
+          // @ts-ignore
+          const p = (f as any).path as string | undefined;
+          if (p) {
+            if (p.toLowerCase().endsWith('.txt') || nameLower.endsWith('.txt')) {
+              pathImports.push(p);
+            }
+          } else if (nameLower.endsWith('.txt')) {
+            contentFiles.push(f as File);
+          }
+        }
+
+        let successCount = 0;
+        let failCount = 0;
+
+        // 1) Import using file paths when possible
+        if (pathImports.length > 0) {
+          for (const p of Array.from(new Set(pathImports))) {
+            try {
+              const result = await window.electronAPI.copyBookToLibrary(p);
+              if (result.success) successCount++; else failCount++;
+            } catch {
+              failCount++;
+            }
+          }
+        }
+
+        // 2) Fallback to content-based import for files without path
+        if (contentFiles.length > 0) {
+          for (const f of contentFiles) {
+            try {
+              const fileName = f.name || '未命名.txt';
+              // Some environments may not support File.text; use FileReader if needed
+              const text = await (f as any).text?.() ?? await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(new Error('读取文件失败'));
+                reader.onload = () => resolve(String(reader.result || ''));
+                reader.readAsText(f);
+              });
+              const result = await window.electronAPI.importTxtContent(fileName, text);
+              if (result.success) successCount++; else failCount++;
+            } catch {
+              failCount++;
+            }
+          }
+        }
+
+        // 3) If neither path nor content determined, try URIs
+        if (pathImports.length === 0 && contentFiles.length === 0) {
+          const rawUris = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
+          const lines = rawUris
+            .split('\n')
+            .map(l => l.trim())
+            .filter(l => l && !l.startsWith('#'));
+          const candidates: string[] = [];
+          for (const line of lines) {
+            let cand: string | null = null;
+            if (line.toLowerCase().startsWith('file:')) {
+              try {
+                let decoded = decodeURI(line.replace(/^file:\/\//, ''));
+                if (/^\/[a-zA-Z]:\//.test(decoded)) decoded = decoded.substring(1);
+                cand = decoded;
+              } catch {
+                cand = null;
+              }
+            } else {
+              cand = line;
+            }
+            if (cand && cand.toLowerCase().endsWith('.txt')) {
+              candidates.push(cand);
+            }
+          }
+          if (candidates.length === 0) {
+            alert('仅支持拖拽TXT文件导入');
+            return;
+          }
+          for (const p of Array.from(new Set(candidates))) {
+            try {
+              const result = await window.electronAPI.copyBookToLibrary(p);
+              if (result.success) successCount++; else failCount++;
+            } catch {
+              failCount++;
+            }
+          }
+        }
+
+        // Refresh bookshelf
+        const updatedBooks = await window.electronAPI.getBooks();
+        const booksWithDropdownState = updatedBooks.map(book => ({ ...book, showDropdown: false }));
+        setBooks(booksWithDropdownState);
+        alert(`导入完成：成功 ${successCount}，失败 ${failCount}`);
+      } catch (err) {
+        console.error('Drag-and-drop import error:', err);
+        alert('拖拽导入失败：' + err);
+      }
+    };
+
+    window.addEventListener('dragover', preventDefault as any);
+    window.addEventListener('drop', handleDrop as any);
+    document.addEventListener('dragenter', preventDefault as any);
+    document.addEventListener('dragleave', preventDefault as any);
+    document.addEventListener('dragover', preventDefault as any);
+
+    return () => {
+      window.removeEventListener('dragover', preventDefault as any);
+      window.removeEventListener('drop', handleDrop as any);
+      document.removeEventListener('dragenter', preventDefault as any);
+      document.removeEventListener('dragleave', preventDefault as any);
+      document.removeEventListener('dragover', preventDefault as any);
+    };
+  }, []);
+
   // Local settings functions
   const loadLocalSettings = async () => {
     try {
@@ -288,10 +438,10 @@ const Bookshelf: React.FC = () => {
     try {
       if (window.electronAPI) {
         // Load WebDAV config from local settings
-        const localSettings = await window.electronAPI.getLocalSettings();
-        if (localSettings.webdavConfig) {
+        const currentLocalSettings = await window.electronAPI.getLocalSettings();
+        if (currentLocalSettings.webdavConfig) {
           // Remove enabled field from UI state, it's handled automatically
-          const { enabled, ...configWithoutEnabled } = localSettings.webdavConfig;
+          const { enabled, ...configWithoutEnabled } = currentLocalSettings.webdavConfig;
           setWebdavConfig(configWithoutEnabled);
         }
       }
@@ -1160,6 +1310,7 @@ const Bookshelf: React.FC = () => {
                   onChange={(e) => {
                     const newConfig = { ...webdavConfig, webdavPath: e.target.value };
                     setWebdavConfig(newConfig);
+                    setIsWebdavConfigDirty(true);
                     autoSaveWebDAVConfig(newConfig);
                   }}
                   placeholder="https://example.com/dav/books"
@@ -1206,6 +1357,7 @@ const Bookshelf: React.FC = () => {
                   onChange={(e) => {
                     const newConfig = { ...webdavConfig, username: e.target.value };
                     setWebdavConfig(newConfig);
+                    setIsWebdavConfigDirty(true);
                     autoSaveWebDAVConfig(newConfig);
                   }}
                   placeholder="your-username"
@@ -1244,6 +1396,7 @@ const Bookshelf: React.FC = () => {
                   onChange={(e) => {
                     const newConfig = { ...webdavConfig, password: e.target.value };
                     setWebdavConfig(newConfig);
+                    setIsWebdavConfigDirty(true);
                     autoSaveWebDAVConfig(newConfig);
                   }}
                   placeholder="your-password"
