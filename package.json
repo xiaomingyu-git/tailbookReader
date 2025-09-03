@@ -15,7 +15,8 @@
     "debug": "npm run kill-port && concurrently \"npm run dev\" \"wait-on http://localhost:7999 && npm run electron-debug\"",
     "pack": "npm run build && electron-builder --dir -w",
     "dist": "npm run build && electron-builder -w",
-    "dist:win": "npm run build && electron-builder --win nsis"
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && electron-builder --mac"
   },
   "keywords": [],
   "author": "",
@@ -55,8 +56,7 @@
       "dist/**",
       "main.js",
       "preload.js",
-      "package.json",
-      "local-settings.json"
+      "package.json"
     ],
     "extraResources": [
       {
@@ -65,6 +65,19 @@
         "filter": ["**/*"]
       }
     ],
+    "mac": {
+      "icon": "bookreader.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["x64", "arm64"]
+        }
+      ]
+    },
     "win": {
       "target": [
         {

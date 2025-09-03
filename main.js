@@ -55,7 +55,6 @@ function getSettingsPath() {
 function getWebDAVConfig() {
   const localSettings = loadLocalSettings();
   return localSettings.webdavConfig || {
-    enabled: false,
     webdavPath: '',
     username: '',
     password: ''
@@ -82,7 +81,6 @@ function loadLocalSettings() {
     webdavFolderPath: null,
     isFirstRun: true,
     webdavConfig: {
-      enabled: false,
       webdavPath: '',
       username: '',
       password: ''
@@ -224,11 +222,6 @@ async function autoUploadBookCacheToWebDAV(bookId) {
   try {
     const webdavConfig = getWebDAVConfig();
 
-    if (!webdavConfig.enabled) {
-      console.log('WebDAV sync disabled, skipping auto upload');
-      return;
-    }
-
     if (!webdavConfig.webdavPath || !webdavConfig.username || !webdavConfig.password) {
       console.log('WebDAV config incomplete, skipping auto upload');
       return;
@@ -258,11 +251,6 @@ async function autoUploadBookCacheToWebDAV(bookId) {
 async function autoDownloadBookProgressFromWebDAV(bookId) {
   try {
     const webdavConfig = getWebDAVConfig();
-
-    if (!webdavConfig.enabled) {
-      console.log('WebDAV sync disabled, skipping auto download');
-      return null;
-    }
 
     if (!webdavConfig.webdavPath || !webdavConfig.username || !webdavConfig.password) {
       console.log('WebDAV config incomplete, skipping auto download');
@@ -1089,10 +1077,6 @@ ipcMain.handle('test-webdav-connection', async (event, config) => {
       enabled: config.enabled
     });
 
-    if (!config.enabled) {
-      return { success: false, message: 'WebDAV同步未启用' };
-    }
-
     if (!config.webdavPath || !config.username || !config.password) {
       return { success: false, message: '请填写完整的WebDAV配置信息' };
     }
@@ -1150,10 +1134,6 @@ ipcMain.handle('upload-all-to-webdav', async (event, config) => {
       enabled: config.enabled
     });
 
-    if (!config.enabled) {
-      return { success: false, message: 'WebDAV同步未启用' };
-    }
-
     if (!config.webdavPath || !config.username || !config.password) {
       return { success: false, message: '请填写完整的WebDAV配置信息' };
     }
@@ -1175,16 +1155,40 @@ ipcMain.handle('upload-all-to-webdav', async (event, config) => {
       return { success: false, message: '本地同步文件夹不存在' };
     }
 
-    // Get all local files from the user's selected folder
+    // Step 1: Delete all remote files first
+    console.log('Step 1: Deleting all remote files...');
+    let deletedCount = 0;
+    try {
+      const remoteItems = await client.getDirectoryContents('/');
+      const remoteFiles = remoteItems.filter(item => item.type === 'file' &&
+        (item.basename.endsWith('.txt') || item.basename.endsWith('.epub') ||
+          item.basename.endsWith('.pdf') || item.basename.endsWith('.mobi') || item.basename.endsWith('.json'))
+      );
+
+      for (const remoteFile of remoteFiles) {
+        try {
+          await client.deleteFile(`/${remoteFile.basename}`);
+          console.log(`Deleted remote file: ${remoteFile.basename}`);
+          deletedCount++;
+        } catch (error) {
+          console.error(`Failed to delete remote file ${remoteFile.basename}:`, error);
+        }
+      }
+    } catch (error) {
+      console.log('No remote files to delete or error accessing remote directory:', error.message);
+    }
+
+    console.log(`Deleted ${deletedCount} remote files`);
+
+    // Step 2: Upload all local files
+    console.log('Step 2: Uploading all local files...');
     const localFiles = fs.readdirSync(localSettings.webdavFolderPath).filter(file =>
       file.endsWith('.txt') || file.endsWith('.epub') || file.endsWith('.pdf') || file.endsWith('.mobi') || file.endsWith('.json')
     );
 
     console.log(`Found ${localFiles.length} local files in ${localSettings.webdavFolderPath}`);
 
-    // Upload all local files
     let uploadedCount = 0;
-
     for (const fileName of localFiles) {
       const localPath = path.join(localSettings.webdavFolderPath, fileName);
       const remotePath = `/${fileName}`; // Upload to root of WebDAV path
@@ -1201,8 +1205,9 @@ ipcMain.handle('upload-all-to-webdav', async (event, config) => {
 
     return {
       success: true,
-      message: `全量上传完成！共上传 ${uploadedCount} 个文件`,
-      uploaded: uploadedCount
+      message: `全量上传完成！删除了 ${deletedCount} 个远程文件，上传了 ${uploadedCount} 个本地文件`,
+      uploaded: uploadedCount,
+      deleted: deletedCount
     };
   } catch (error) {
     console.error('WebDAV upload all failed:', error);
@@ -1218,10 +1223,6 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
       username: config.username,
       enabled: config.enabled
     });
-
-    if (!config.enabled) {
-      return { success: false, message: 'WebDAV同步未启用' };
-    }
 
     if (!config.webdavPath || !config.username || !config.password) {
       return { success: false, message: '请填写完整的WebDAV配置信息' };
@@ -1244,7 +1245,32 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
       fs.mkdirSync(localSettings.webdavFolderPath, { recursive: true });
     }
 
-    // Get remote files from the root of WebDAV path
+    // Step 1: Delete all local files first
+    console.log('Step 1: Deleting all local files...');
+    let deletedCount = 0;
+    try {
+      const localFiles = fs.readdirSync(localSettings.webdavFolderPath).filter(file =>
+        file.endsWith('.txt') || file.endsWith('.epub') || file.endsWith('.pdf') || file.endsWith('.mobi') || file.endsWith('.json')
+      );
+
+      for (const fileName of localFiles) {
+        try {
+          const localPath = path.join(localSettings.webdavFolderPath, fileName);
+          fs.unlinkSync(localPath);
+          console.log(`Deleted local file: ${fileName}`);
+          deletedCount++;
+        } catch (error) {
+          console.error(`Failed to delete local file ${fileName}:`, error);
+        }
+      }
+    } catch (error) {
+      console.log('No local files to delete or error accessing local directory:', error.message);
+    }
+
+    console.log(`Deleted ${deletedCount} local files`);
+
+    // Step 2: Download all remote files
+    console.log('Step 2: Downloading all remote files...');
     let remoteItems = [];
     try {
       remoteItems = await client.getDirectoryContents('/');
@@ -1260,7 +1286,6 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
 
     console.log(`Found ${remoteFiles.length} remote files`);
 
-    // Download all remote files
     let downloadedCount = 0;
     let bookJsonOverwritten = false;
 
@@ -1274,7 +1299,7 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
         console.log(`Downloaded file: ${remoteFile.basename}`);
         downloadedCount++;
 
-        // Check if book.json was overwritten
+        // Check if book.json was downloaded
         if (remoteFile.basename === 'book.json') {
           bookJsonOverwritten = true;
         }
@@ -1283,7 +1308,7 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
       }
     }
 
-    let message = `全量下载完成！共下载 ${downloadedCount} 个文件`;
+    let message = `全量下载完成！删除了 ${deletedCount} 个本地文件，下载了 ${downloadedCount} 个远程文件`;
     if (bookJsonOverwritten) {
       message += '（book.json已更新）';
     }
@@ -1292,6 +1317,7 @@ ipcMain.handle('download-all-from-webdav', async (event, config) => {
       success: true,
       message: message,
       downloaded: downloadedCount,
+      deleted: deletedCount,
       bookJsonOverwritten: bookJsonOverwritten
     };
   } catch (error) {

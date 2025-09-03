@@ -65,10 +65,11 @@ const Bookshelf: React.FC = () => {
   const [webdavConfig, setWebdavConfig] = useState({
     webdavPath: '',
     username: '',
-    password: '',
-    enabled: false
+    password: ''
   });
   const [showWebDAVFolderModal, setShowWebDAVFolderModal] = useState(false);
+  const [webdavSaveTimeout, setWebdavSaveTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [showAutoSaveIndicator, setShowAutoSaveIndicator] = useState(false);
 
 
 
@@ -141,6 +142,15 @@ const Bookshelf: React.FC = () => {
       document.removeEventListener('click', handleClickOutside);
     };
   }, []);
+
+  // Cleanup timeout on component unmount
+  useEffect(() => {
+    return () => {
+      if (webdavSaveTimeout) {
+        clearTimeout(webdavSaveTimeout);
+      }
+    };
+  }, [webdavSaveTimeout]);
 
     const loadBooks = async () => {
     try {
@@ -260,6 +270,11 @@ const Bookshelf: React.FC = () => {
         await saveLocalSettings(newSettings);
         setShowFirstRunSetup(false);
         setShowWebDAVFolderModal(false);
+
+        // Reload books after changing the storage path
+        console.log('Storage path changed, reloading books...');
+        await loadBooks();
+
         alert(`WebDAV同步文件夹已设置为：${folderPath}`);
       }
     } catch (error) {
@@ -275,7 +290,9 @@ const Bookshelf: React.FC = () => {
         // Load WebDAV config from local settings
         const localSettings = await window.electronAPI.getLocalSettings();
         if (localSettings.webdavConfig) {
-          setWebdavConfig(localSettings.webdavConfig);
+          // Remove enabled field from UI state, it's handled automatically
+          const { enabled, ...configWithoutEnabled } = localSettings.webdavConfig;
+          setWebdavConfig(configWithoutEnabled);
         }
       }
     } catch (error) {
@@ -283,21 +300,44 @@ const Bookshelf: React.FC = () => {
     }
   };
 
-  const saveWebDAVConfig = async () => {
+
+
+  // Auto-save WebDAV config with debounce
+  const autoSaveWebDAVConfig = async (newConfig: any) => {
     try {
       if (window.electronAPI) {
-        // Save WebDAV config to local settings
-        const result = await window.electronAPI.saveWebDAVConfig(webdavConfig);
-        if (result.success) {
-          alert('WebDAV配置已保存！');
-          setShowWebDAVConfig(false);
-        } else {
-          alert('保存WebDAV配置失败：' + result.message);
+        // Clear existing timeout
+        if (webdavSaveTimeout) {
+          clearTimeout(webdavSaveTimeout);
         }
+
+        // Set new timeout for auto-save
+        const timeout = setTimeout(async () => {
+          try {
+            // Auto-enable WebDAV when configuration is provided
+            const configToSave = {
+              ...newConfig,
+              enabled: !!(newConfig.webdavPath && newConfig.username && newConfig.password)
+            };
+
+            const result = await window.electronAPI.saveWebDAVConfig(configToSave);
+            if (result.success) {
+              console.log('WebDAV配置已自动保存');
+              // Show auto-save indicator
+              setShowAutoSaveIndicator(true);
+              setTimeout(() => setShowAutoSaveIndicator(false), 2000);
+            } else {
+              console.error('自动保存WebDAV配置失败：', result.message);
+            }
+          } catch (error) {
+            console.error('自动保存WebDAV配置时出错：', error);
+          }
+        }, 1000); // 1秒防抖
+
+        setWebdavSaveTimeout(timeout);
       }
     } catch (error) {
-      console.error('Error saving WebDAV config:', error);
-      alert('保存WebDAV配置失败：' + error);
+      console.error('Error setting up auto-save for WebDAV config:', error);
     }
   };
 
@@ -308,7 +348,11 @@ const Bookshelf: React.FC = () => {
         return;
       }
 
+      // Ensure local settings are up to date before testing
+      await loadLocalSettings();
+
       console.log('Testing WebDAV connection with config:', webdavConfig);
+      console.log('Current local settings:', localSettings);
 
       const result = await window.electronAPI.testWebDAVConnection(webdavConfig);
 
@@ -332,7 +376,11 @@ const Bookshelf: React.FC = () => {
         return;
       }
 
+      // Ensure local settings are up to date before uploading
+      await loadLocalSettings();
+
       console.log('Starting WebDAV upload with config:', webdavConfig);
+      console.log('Current local settings:', localSettings);
 
       const result = await window.electronAPI.uploadAllToWebDAV(webdavConfig);
 
@@ -354,7 +402,11 @@ const Bookshelf: React.FC = () => {
         return;
       }
 
+      // Ensure local settings are up to date before downloading
+      await loadLocalSettings();
+
       console.log('Starting WebDAV download with config:', webdavConfig);
+      console.log('Current local settings:', localSettings);
 
       const result = await window.electronAPI.downloadAllFromWebDAV(webdavConfig);
 
@@ -1064,6 +1116,16 @@ const Bookshelf: React.FC = () => {
                 letterSpacing: '0.5px'
               }}>
                 ☁️ WebDAV 同步配置
+                {showAutoSaveIndicator && (
+                  <span style={{
+                    marginLeft: '12px',
+                    fontSize: '14px',
+                    opacity: '0.9',
+                    fontWeight: '400'
+                  }}>
+                    ✅ 已自动保存
+                  </span>
+                )}
               </h2>
               <p style={{
                 margin: '8px 0 0 0',
@@ -1095,7 +1157,11 @@ const Bookshelf: React.FC = () => {
                 <input
                   type="text"
                   value={webdavConfig.webdavPath}
-                  onChange={(e) => setWebdavConfig(prev => ({ ...prev, webdavPath: e.target.value }))}
+                  onChange={(e) => {
+                    const newConfig = { ...webdavConfig, webdavPath: e.target.value };
+                    setWebdavConfig(newConfig);
+                    autoSaveWebDAVConfig(newConfig);
+                  }}
                   placeholder="https://example.com/dav/books"
                   style={{
                     width: '100%',
@@ -1137,7 +1203,11 @@ const Bookshelf: React.FC = () => {
                 <input
                   type="text"
                   value={webdavConfig.username}
-                  onChange={(e) => setWebdavConfig(prev => ({ ...prev, username: e.target.value }))}
+                  onChange={(e) => {
+                    const newConfig = { ...webdavConfig, username: e.target.value };
+                    setWebdavConfig(newConfig);
+                    autoSaveWebDAVConfig(newConfig);
+                  }}
                   placeholder="your-username"
                   style={{
                     width: '100%',
@@ -1171,7 +1241,11 @@ const Bookshelf: React.FC = () => {
                 <input
                   type="password"
                   value={webdavConfig.password}
-                  onChange={(e) => setWebdavConfig(prev => ({ ...prev, password: e.target.value }))}
+                  onChange={(e) => {
+                    const newConfig = { ...webdavConfig, password: e.target.value };
+                    setWebdavConfig(newConfig);
+                    autoSaveWebDAVConfig(newConfig);
+                  }}
                   placeholder="your-password"
                   style={{
                     width: '100%',
@@ -1192,43 +1266,7 @@ const Bookshelf: React.FC = () => {
                 />
               </div>
 
-              <div style={{
-                marginBottom: '32px',
-                padding: '16px',
-                backgroundColor: '#f8fafc',
-                borderRadius: '8px',
-                border: '1px solid #e2e8f0'
-              }}>
-                <label style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  fontSize: '14px',
-                  color: '#374151',
-                  cursor: 'pointer',
-                  fontWeight: '500'
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={webdavConfig.enabled}
-                    onChange={(e) => setWebdavConfig(prev => ({ ...prev, enabled: e.target.checked }))}
-                    style={{
-                      marginRight: '12px',
-                      width: '18px',
-                      height: '18px',
-                      accentColor: '#667eea'
-                    }}
-                  />
-                  ✅ 启用 WebDAV 同步
-                </label>
-                <p style={{
-                  margin: '8px 0 0 30px',
-                  fontSize: '12px',
-                  color: '#6b7280',
-                  lineHeight: '1.4'
-                }}>
-                  启用后，您的阅读进度和书签将自动同步到云端
-                </p>
-              </div>
+
             </div>
 
             {/* Footer */}
@@ -1271,35 +1309,7 @@ const Bookshelf: React.FC = () => {
                 🔗 测试连接
               </button>
 
-              <button
-                onClick={saveWebDAVConfig}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: '#4a90e2',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  transition: 'all 0.2s',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  minWidth: '140px',
-                  justifyContent: 'center'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#357abd';
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = '#4a90e2';
-                  e.currentTarget.style.transform = 'translateY(0)';
-                }}
-              >
-                💾 保存配置
-              </button>
+
 
               <button
                 onClick={uploadAllToWebDAV}
