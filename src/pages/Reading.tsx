@@ -12,7 +12,6 @@ interface Book {
   metadata?: any; // For EPUB metadata
   toc?: any[]; // For EPUB table of contents
   readingProgress?: {
-    progress: number; // 0-100 percentage
     lastReadAt: string;
     readingTime: number; // in minutes
   };
@@ -21,9 +20,10 @@ interface Book {
 
 interface Bookmark {
   id: string;
-  progress: number; // 0-100 percentage
   description: string;
   createdAt: string;
+  byteOffset?: number;
+  offset?: number;
 }
 
 
@@ -83,7 +83,6 @@ const Reading: React.FC = () => {
   };
   const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [readingProgress, setReadingProgress] = useState(0);
-  const [preloadedProgress, setPreloadedProgress] = useState<number | null>(null);
   const [showToolbar, setShowToolbar] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const progressBarRef = useRef<HTMLDivElement>(null);
@@ -107,6 +106,17 @@ const Reading: React.FC = () => {
   const [isBookmarkJumping, setIsBookmarkJumping] = useState(false);
   const webdavSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const settingsSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const resizeToastPendingRef = useRef<boolean>(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    try {
+      setToastMessage(msg);
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = setTimeout(() => setToastMessage(null), 2000);
+    } catch {}
+  };
 
   const triggerWebDAVSync = () => {
     try {
@@ -184,6 +194,9 @@ const Reading: React.FC = () => {
       if (settingsSaveTimerRef.current) {
         clearTimeout(settingsSaveTimerRef.current);
       }
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
     };
   }, [search]);
 
@@ -210,6 +223,8 @@ const Reading: React.FC = () => {
         setWindowSize({ width: window.innerWidth, height: window.innerHeight });
         // end of resize
         resizeInProgressRef.current = false;
+        // Schedule a toast once alignment happens
+        resizeToastPendingRef.current = true;
       }, 250); // slightly tighter debounce to reduce perceived lag
     };
 
@@ -266,6 +281,11 @@ const Reading: React.FC = () => {
       // Once we align from a restore, clear restoring flag to avoid later re-alignments overriding user nav
       if (isRestoringRef.current) isRestoringRef.current = false;
       lastAlignSignatureRef.current = sig;
+      if (resizeToastPendingRef.current) {
+        const pct = totalByteLength > 0 ? Math.round((Math.max(0, Math.min(anchorByteOffset, totalByteLength - 1)) / Math.max(1, totalByteLength - 1)) * 10000) / 100 : undefined;
+        showToast(typeof pct === 'number' ? `已按上次位置对齐：${pct}%` : '已按上次位置对齐');
+        resizeToastPendingRef.current = false;
+      }
       return;
     }
     // Fallback to character anchor
@@ -282,6 +302,10 @@ const Reading: React.FC = () => {
       }
       if (isRestoringRef.current) isRestoringRef.current = false;
       lastAlignSignatureRef.current = sig;
+      if (resizeToastPendingRef.current) {
+        showToast('已按上次位置对齐');
+        resizeToastPendingRef.current = false;
+      }
     }
   }, [anchorByteOffset, pageStartByteOffsets, anchorOffset, pageStartOffsets, totalPages]);
 
@@ -311,26 +335,7 @@ const Reading: React.FC = () => {
     paginateContent(content);
   }, [content, fontSize, lineHeight, windowSize, paddingTop, paddingBottom, paddingLeft, paddingRight, loading]);
 
-  // Apply preloaded progress after pagination is complete
-  useEffect(() => {
-    console.log('进度应用useEffect触发:', { preloadedProgress, totalPages, currentPage });
-
-    if (preloadedProgress !== null && preloadedProgress > 0 && totalPages > 1) {
-      const targetPage = Math.max(1, Math.min(totalPages, Math.round(preloadedProgress * totalPages) + 1));
-      console.log(`计算目标页面: 进度=${(preloadedProgress * 100).toFixed(2)}%, 总页数=${totalPages}, 目标页=${targetPage}`);
-      setCurrentPage(targetPage);
-      console.log(`分页完成后应用预加载进度: ${(preloadedProgress * 100).toFixed(2)}%，跳转到第 ${targetPage} 页`);
-      // Clear preloaded progress after application
-      setPreloadedProgress(null);
-    } else {
-      console.log('不满足进度应用条件:', {
-        hasPreloadedProgress: preloadedProgress !== null,
-        progressValue: preloadedProgress,
-        totalPages,
-        condition: preloadedProgress !== null && preloadedProgress > 0 && totalPages > 1
-      });
-    }
-  }, [totalPages, preloadedProgress]);
+  // 移除百分比预加载方案（仅保留字节锚点方案）
 
   // Load user settings when component mounts
   useEffect(() => {
@@ -370,7 +375,7 @@ const Reading: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [totalPages]);
+  }, [totalPages, currentPage]);
 
   // Mouse event handlers for progress bar
   useEffect(() => {
@@ -387,7 +392,8 @@ const Reading: React.FC = () => {
     const handleMouseUp = () => {
       setIsDragging(false);
       // Save reading progress after drag operation
-      saveReadingProgress();
+      // Use the page derived from the last mouse position
+      saveReadingProgress(currentPage);
     };
 
     if (isDragging) {
@@ -412,7 +418,7 @@ const Reading: React.FC = () => {
     setCurrentPage(newPage);
 
     // Save reading progress after clicking progress bar
-    saveReadingProgress();
+    saveReadingProgress(newPage);
   };
 
   // Handle bookmark functionality
@@ -425,13 +431,25 @@ const Reading: React.FC = () => {
     if (!book) return;
 
     try {
-      // Create new bookmark
-      const progressPercentage = totalPages > 0 ? Math.round(((currentPage - 1) / totalPages) * 10000) / 100 : 0;
+      // Determine current byte offset and percentage
+      let currentByte: number | null = null;
+      if (pageStartByteOffsets && pageStartByteOffsets.length >= currentPage) {
+        currentByte = pageStartByteOffsets[currentPage - 1];
+      } else if (typeof anchorByteOffset === 'number') {
+        currentByte = anchorByteOffset;
+      }
+      const progressPercentage = ((): number => {
+        if (typeof currentByte === 'number' && totalByteLength > 0) {
+          return Math.round((currentByte / Math.max(1, totalByteLength - 1)) * 10000) / 100;
+        }
+        return 0;
+      })();
       const newBookmark: Bookmark = {
         id: Date.now().toString(),
-        progress: progressPercentage,
         description: `${progressPercentage.toFixed(2)}%`,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        byteOffset: typeof currentByte === 'number' ? currentByte : undefined,
+        offset: pageStartOffsets && pageStartOffsets.length >= currentPage ? pageStartOffsets[currentPage - 1] : undefined
       };
 
       // Get current bookmarks
@@ -441,9 +459,10 @@ const Reading: React.FC = () => {
       // Prepare progress data with updated bookmarks
       const progressData = {
         bookId: book.id,
-        progress: progressPercentage,
-        currentPage: currentPage,
-        totalPages: totalPages,
+        anchorByteOffset: typeof currentByte === 'number' ? currentByte : undefined,
+        anchorOffset: pageStartOffsets && pageStartOffsets.length >= currentPage ? pageStartOffsets[currentPage - 1] : undefined,
+        totalByteLength: totalByteLength || undefined,
+        contentHash: contentHash || undefined,
         lastReadAt: new Date().toISOString(),
         readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
         bookmarks: updatedBookmarks,
@@ -462,15 +481,19 @@ const Reading: React.FC = () => {
             bookmarks: updatedBookmarks
           }));
 
-          alert(`书签已添加: ${progressPercentage.toFixed(2)}%`);
+          if (!isNaN(progressPercentage)) {
+            showToast(`书签已添加: ${progressPercentage.toFixed(2)}%`);
+          } else {
+            showToast('书签已添加');
+          }
         } else {
           console.error('添加书签失败:', result.message);
-          alert('添加书签失败');
+          showToast('添加书签失败');
         }
       }
     } catch (error) {
       console.error('添加书签失败:', error);
-      alert('添加书签失败');
+      showToast('添加书签失败');
     }
   };
 
@@ -478,13 +501,27 @@ const Reading: React.FC = () => {
   const jumpToBookmark = async (bookmark: Bookmark) => {
     if (totalPages > 0) {
       setIsBookmarkJumping(true);
-      const targetPage = Math.max(1, Math.min(totalPages, Math.round((bookmark.progress / 100) * totalPages) + 1));
+      let targetPage = 1;
+      if (typeof bookmark.byteOffset === 'number' && pageStartByteOffsets && pageStartByteOffsets.length > 0) {
+        const idx = (() => {
+          for (let i = pageStartByteOffsets.length - 1; i >= 0; i--) {
+            if (pageStartByteOffsets[i] <= bookmark.byteOffset!) return i;
+          }
+          return 0;
+        })();
+        targetPage = idx + 1;
+        setAnchorByteOffset(bookmark.byteOffset);
+      }
       setCurrentPage(targetPage);
       setShowBookmarks(false);
-      console.log(`跳转到书签: ${bookmark.progress.toFixed(2)}% (第${targetPage}页)`);
+      const pct = typeof bookmark.byteOffset === 'number' && totalByteLength > 0
+        ? Math.round((bookmark.byteOffset / Math.max(1, totalByteLength - 1)) * 10000) / 100
+        : NaN;
+      console.log(`跳转到书签: ${pct.toFixed(2)}% (第${targetPage}页)`);
+      showToast(`已跳转到书签：${pct.toFixed(2)}%`);
 
       // Update reading progress after jumping to bookmark - use bookmark's progress directly
-      saveReadingProgressWithProgress(bookmark.progress);  // 直接使用书签的进度百分比
+      saveReadingProgressWithProgress(NaN);
       setIsBookmarkJumping(false);
     }
   };
@@ -498,15 +535,13 @@ const Reading: React.FC = () => {
       const currentBookmarks = book.bookmarks || [];
       const updatedBookmarks = currentBookmarks.filter(b => b.id !== bookmarkId);
 
-      // Get current progress data
-      const progressPercentage = totalPages > 0 ? Math.round(((currentPage - 1) / totalPages) * 10000) / 100 : 0;
-
-      // Prepare progress data with updated bookmarks
+      // Prepare progress data with updated bookmarks (byte-anchor only)
       const progressData = {
         bookId: book.id,
-        progress: progressPercentage,
-        currentPage: currentPage,
-        totalPages: totalPages,
+        anchorByteOffset: typeof anchorByteOffset === 'number' ? anchorByteOffset : (pageStartByteOffsets?.[currentPage - 1] ?? undefined),
+        anchorOffset: typeof anchorOffset === 'number' ? anchorOffset : (pageStartOffsets?.[currentPage - 1] ?? undefined),
+        totalByteLength: totalByteLength || undefined,
+        contentHash: contentHash || undefined,
         lastReadAt: new Date().toISOString(),
         readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
         bookmarks: updatedBookmarks,
@@ -540,13 +575,13 @@ const Reading: React.FC = () => {
     try {
       // Use targetPage if provided, otherwise use currentPage
       const pageToSave = targetPage || currentPage;
-      // Progress now based on byte offsets rather than page/percentage; retain percentage for UI only
+      // Progress strictly from byte offsets; percentage only derived if anchor exists
       const progressPercentage = (() => {
         if (pageStartByteOffsets && pageStartByteOffsets.length >= pageToSave && totalByteLength > 0) {
           const currentByte = pageStartByteOffsets[pageToSave - 1];
           return Math.round((currentByte / Math.max(1, totalByteLength - 1)) * 10000) / 100;
         }
-        return totalPages > 0 ? Math.round(((pageToSave - 1) / totalPages) * 10000) / 100 : 0;
+        return 0;
       })();
 
       // Determine precise anchor offset for the first visible line on this page
@@ -571,17 +606,15 @@ const Reading: React.FC = () => {
       // Prepare progress data
       const progressData = {
         bookId: book.id,
-        progress: progressPercentage,
-        currentPage: pageToSave,
-        totalPages: totalPages,
-        lastReadAt: new Date().toISOString(),
-        readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
-        bookmarks: book.bookmarks || [],
-        lastUpdated: new Date().toISOString(),
+        // 仅保留字节锚点方案，下列百分比/页数仅作兼容显示，必要时可去除
         anchorOffset: typeof anchor === 'number' ? anchor : undefined,
         anchorByteOffset: typeof anchorByte === 'number' ? anchorByte : undefined,
         totalByteLength: totalByteLength || undefined,
         contentHash: contentHash || undefined,
+        lastReadAt: new Date().toISOString(),
+        readingTime: Math.floor((new Date().getTime() - startTime.getTime()) / (1000 * 60)),
+        bookmarks: book.bookmarks || [],
+        lastUpdated: new Date().toISOString(),
         location: typeof location === 'number' ? location : undefined
       };
 
@@ -589,7 +622,11 @@ const Reading: React.FC = () => {
       if (window.electronAPI) {
         const result = await window.electronAPI.saveBookProgress(book.id, progressData);
         if (result.success) {
-          console.log(`保存阅读进度: ${progressPercentage.toFixed(2)}%`);
+          if (!isNaN(progressPercentage)) {
+            console.log(`保存阅读进度(字节): ${progressPercentage.toFixed(2)}%`);
+          } else {
+            console.log('保存阅读进度(字节)');
+          }
         } else {
           console.error('保存阅读进度失败:', result.message);
         }
@@ -600,7 +637,7 @@ const Reading: React.FC = () => {
   };
 
   // Save reading progress with specific progress percentage (for bookmark jumps)
-  const saveReadingProgressWithProgress = async (progressPercentage: number) => {
+  const saveReadingProgressWithProgress = async (_progressPercentage: number) => {
     if (!book) return;
 
     try {
@@ -614,8 +651,6 @@ const Reading: React.FC = () => {
           return 0;
         })();
         targetPage = idx + 1;
-      } else {
-        targetPage = Math.max(1, Math.min(totalPages, Math.round((progressPercentage / 100) * totalPages) + 1));
       }
 
       // Determine precise anchor offset for the first visible line on this page
@@ -631,7 +666,7 @@ const Reading: React.FC = () => {
       // Prepare progress data
       const progressData = {
         bookId: book.id,
-        progress: progressPercentage,
+        // 百分比入参已废弃
         currentPage: targetPage,
         totalPages: totalPages,
         lastReadAt: new Date().toISOString(),
@@ -646,7 +681,7 @@ const Reading: React.FC = () => {
       if (window.electronAPI) {
         const result = await window.electronAPI.saveBookProgress(book.id, progressData);
         if (result.success) {
-          console.log(`保存阅读进度: ${progressPercentage.toFixed(2)}%`);
+          console.log('保存阅读进度(字节)');
         } else {
           console.error('保存阅读进度失败:', result.message);
         }
@@ -685,28 +720,25 @@ const Reading: React.FC = () => {
             setAnchorByteOffset(savedAnchorByteOffset);
             isRestoringRef.current = true;
             console.log(`预加载字节锚点: ${savedAnchorByteOffset}，等待分页对齐`);
+            // Show toast with percent if possible
+            try {
+              if (rawText) {
+                const enc = new TextEncoder();
+                const totalBytes = enc.encode(rawText).length;
+                const pct = Math.round((Math.max(0, Math.min(savedAnchorByteOffset, totalBytes - 1)) / Math.max(1, totalBytes - 1)) * 10000) / 100;
+                showToast(`已恢复到上次阅读：${pct}%`);
+              } else if (typeof totalByteLength === 'number' && totalByteLength > 0) {
+                const pct = Math.round((Math.max(0, Math.min(savedAnchorByteOffset, totalByteLength - 1)) / Math.max(1, totalByteLength - 1)) * 10000) / 100;
+                showToast(`已恢复到上次阅读：${pct}%`);
+              } else {
+                showToast('已恢复到上次阅读位置');
+              }
+            } catch {}
           } else if (typeof savedAnchorOffset === 'number' && savedAnchorOffset >= 0) {
             setAnchorOffset(savedAnchorOffset);
             isRestoringRef.current = true;
             console.log(`预加载锚点偏移: ${savedAnchorOffset}，等待分页对齐`);
-          } else if (progress > 0) {
-            // Convert percent to byte anchor using provided rawText if available
-            if (rawText) {
-              try {
-                const encoder = new TextEncoder();
-                const totalBytes = encoder.encode(rawText).length;
-                const byteAnchor = Math.max(0, Math.min(totalBytes - 1, Math.round((progress / 100) * (Math.max(1, totalBytes - 1)))));
-                setAnchorByteOffset(byteAnchor);
-                isRestoringRef.current = true;
-                console.log(`由百分比推算字节锚点: ${byteAnchor}/${totalBytes}`);
-              } catch (e) {
-                setPreloadedProgress(progress / 100);
-                console.log(`预加载阅读进度: ${progress.toFixed(2)}%，等待分页完成后应用`);
-              }
-            } else {
-              setPreloadedProgress(progress / 100);
-              console.log(`预加载阅读进度: ${progress.toFixed(2)}%，等待分页完成后应用`);
-            }
+            showToast('已恢复到上次阅读位置');
           } else {
             console.log('未找到有效阅读进度，从第1页开始');
           }
@@ -1061,7 +1093,6 @@ const Reading: React.FC = () => {
 
       console.log('分页完成:', {
         totalPages: newPages.length,
-        preloadedProgress,
         currentPage
       });
 
@@ -1086,8 +1117,7 @@ const Reading: React.FC = () => {
   const loadBook = async () => {
     try {
       setLoading(true);
-      // Clear any preloaded progress when loading a new book
-      setPreloadedProgress(null);
+      // 仅字节锚点方案，无需处理百分比预加载
       const bookId = (search as any)?.bookId;
       console.log('Reading.tsx - Loading book with ID:', bookId);
       console.log('Reading.tsx - Search object:', search);
@@ -1266,10 +1296,11 @@ const Reading: React.FC = () => {
             <button
               onClick={async (e) => {
                 e.stopPropagation();
-                setCurrentPage(prev => Math.max(1, prev - 1));
+                const target = Math.max(1, currentPage - 1);
+                setCurrentPage(target);
                 setShowTableOfContents(false);
                 // Save reading progress after page change
-                saveReadingProgress();
+                saveReadingProgress(target);
               }}
               style={{
                 position: 'absolute',
@@ -1307,10 +1338,11 @@ const Reading: React.FC = () => {
             <button
               onClick={async (e) => {
                 e.stopPropagation();
-                setCurrentPage(prev => Math.min(totalPages, prev + 1));
+                const target = Math.min(totalPages, currentPage + 1);
+                setCurrentPage(target);
                 setShowTableOfContents(false);
                 // Save reading progress after page change
-                saveReadingProgress();
+                saveReadingProgress(target);
               }}
               style={{
                 position: 'absolute',
@@ -1344,6 +1376,28 @@ const Reading: React.FC = () => {
               →
             </button>
           </div>
+
+          {/* Restore/align toast */}
+          {toastMessage && (
+            <div
+              style={{
+                position: 'fixed',
+                bottom: '90px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                backgroundColor: 'rgba(0,0,0,0.75)',
+                color: 'white',
+                padding: '10px 14px',
+                borderRadius: '12px',
+                fontSize: '12px',
+                zIndex: 2000,
+                pointerEvents: 'none',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+              }}
+            >
+              {toastMessage}
+            </div>
+          )}
 
                     {/* Floating toolbar - only show when showToolbar is true */}
           {showToolbar && (
@@ -2104,7 +2158,13 @@ const Reading: React.FC = () => {
                           alignItems: 'center',
                           justifyContent: 'space-between'
                         }}>
-                          <span>{bookmark.progress.toFixed(2)}%</span>
+                          <span>{(() => {
+                            if (typeof bookmark.byteOffset === 'number' && totalByteLength > 0) {
+                              const pct = Math.round((bookmark.byteOffset / Math.max(1, totalByteLength - 1)) * 10000) / 100;
+                              return `${pct.toFixed(2)}%`;
+                            }
+                            return '—';
+                          })()}</span>
                           <span>{new Date(bookmark.createdAt).toLocaleDateString()}</span>
                         </div>
                       </div>

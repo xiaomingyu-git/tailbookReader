@@ -564,14 +564,29 @@ ipcMain.handle('get-books', async () => {
           try {
             const cacheData = await loadBookProgressFromCache(book.id);
             if (cacheData) {
+              // Prefer byte-offset to compute progress percentage reliably
+              let percent = 0;
+              try {
+                const byte = typeof cacheData.anchorByteOffset === 'number' ? cacheData.anchorByteOffset : null;
+                const totalBytes = typeof cacheData.totalByteLength === 'number' ? cacheData.totalByteLength : null;
+                if (byte !== null && totalBytes && totalBytes > 1) {
+                  percent = Math.round((Math.max(0, Math.min(byte, totalBytes - 1)) / Math.max(1, totalBytes - 1)) * 10000) / 100;
+                } else if (typeof cacheData.progress === 'number') {
+                  percent = Math.round(cacheData.progress * 100) / 100;
+                }
+              } catch (_) {
+                percent = typeof cacheData.progress === 'number' ? Math.round(cacheData.progress * 100) / 100 : 0;
+              }
+
               return {
                 ...book,
                 filePath: updatedFilePath, // Return absolute path for reading
+                // 不再将进度写入 readingProgress.progress，仅透出一个只读字段方便前端展示
                 readingProgress: {
-                  progress: Math.round(cacheData.progress * 100) / 100, // 精确到小数点后2位
                   lastReadAt: cacheData.lastReadAt,
                   readingTime: cacheData.readingTime
                 },
+                readingProgressPercent: percent,
                 bookmarks: cacheData.bookmarks || []
               };
             }

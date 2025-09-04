@@ -1023,12 +1023,12 @@ const Bookshelf: React.FC = () => {
                 }}>
                   {formatFileSize(book.size)}
                 </p>
-                {book.readingProgress?.progress !== undefined && (
+                {typeof (book as any).readingProgressPercent === 'number' && (
                   <div style={{
                     fontSize: '12px',
                     color: '#999'
                   }}>
-                    进度: {book.readingProgress.progress.toFixed(2)}%
+                    进度: {(book as any).readingProgressPercent.toFixed(2)}%
                     <div style={{
                       width: '100%',
                       height: '4px',
@@ -1038,7 +1038,7 @@ const Bookshelf: React.FC = () => {
                       overflow: 'hidden'
                     }}>
                       <div style={{
-                        width: `${book.readingProgress.progress}%`,
+                        width: `${(book as any).readingProgressPercent}%`,
                         height: '100%',
                         backgroundColor: '#4a90e2',
                         transition: 'width 0.3s'
