@@ -13,6 +13,7 @@
         "flutter_charset_detector",
         "go_router",
         "http",
+        "path",
         "path_provider",
         "permission_handler",
         "shared_preferences",
@@ -47,6 +48,11 @@
         "test_api",
         "vector_math"
       ]
+    },
+    {
+      "name": "path",
+      "version": "1.9.1",
+      "dependencies": []
     },
     {
       "name": "webdav_client",
@@ -214,11 +220,6 @@
         "clock",
         "collection"
       ]
-    },
-    {
-      "name": "path",
-      "version": "1.9.1",
-      "dependencies": []
     },
     {
       "name": "matcher",

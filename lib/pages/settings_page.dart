@@ -6,6 +6,9 @@ import 'package:webdav_client/webdav_client.dart';
 import 'package:http/http.dart' as http;
 import 'dart:io';
 import 'dart:convert';
+import 'dart:async';
+import '../services/storage_service.dart';
+import 'permission_guide_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -29,6 +32,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // 本地路径配置
   String _localStoragePath = '';
+  final StorageService _storageService = StorageService.instance;
 
   final List<String> _fontOptions = [
     '系统默认',
@@ -58,26 +62,16 @@ class _SettingsPageState extends State<SettingsPage> {
       _webdavUsername = prefs.getString('webdav_username') ?? '';
       _webdavPassword = prefs.getString('webdav_password') ?? '';
       _webdavEnabled = prefs.getBool('webdav_enabled') ?? false;
-
-      // 本地路径配置
-      _localStoragePath = prefs.getString('local_storage_path') ?? '';
-
-      // 如果没有设置本地路径，使用默认路径
-      if (_localStoragePath.isEmpty) {
-        _getDefaultStoragePath();
-      }
     });
-  }
 
-  Future<void> _getDefaultStoragePath() async {
+    // 从存储服务获取路径
     try {
-      final directory = await getApplicationDocumentsDirectory();
+      final path = await _storageService.getStoragePath();
       setState(() {
-        _localStoragePath = directory.path;
+        _localStoragePath = path ?? '';
       });
-      await _saveSettings();
     } catch (e) {
-      print('获取默认存储路径失败: $e');
+      print('获取存储路径失败: $e');
     }
   }
 
@@ -94,9 +88,6 @@ class _SettingsPageState extends State<SettingsPage> {
     await prefs.setString('webdav_username', _webdavUsername);
     await prefs.setString('webdav_password', _webdavPassword);
     await prefs.setBool('webdav_enabled', _webdavEnabled);
-
-    // 本地路径配置
-    await prefs.setString('local_storage_path', _localStoragePath);
   }
 
   void _showAboutDialog() {
@@ -158,20 +149,45 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
 
+    // 在配置对话框内显示测试结果，不关闭对话框
+    _showWebDAVTestResultInDialog();
+  }
+
+  void _showWebDAVTestResultInDialog() {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const AlertDialog(
-        content: Row(
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(width: 16),
-            Text('正在测试连接...'),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Text('正在测试连接...'),
+            ],
+          ),
+          content: const Text('请稍候，正在测试WebDAV连接...'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
           ],
         ),
       ),
     );
 
+    // 异步执行测试
+    _performWebDAVTest().then((result) {
+      // 关闭加载对话框
+      Navigator.pop(context);
+
+      // 显示结果对话框
+      _showWebDAVTestResult(result['success'], result['message']);
+    });
+  }
+
+  Future<Map<String, dynamic>> _performWebDAVTest() async {
     try {
       // 清理URL格式
       String cleanUrl = _webdavUrl.trim();
@@ -185,84 +201,214 @@ class _SettingsPageState extends State<SettingsPage> {
       print('尝试连接WebDAV: $cleanUrl');
       print('用户名: $_webdavUsername');
 
-      final client = newClient(
-        cleanUrl,
-        user: _webdavUsername,
-        password: _webdavPassword,
-        debug: true,
-      );
-
-      // 尝试多种连接测试方法
-      bool connected = false;
-      String testResult = '';
-
+      // 先尝试基本的网络连接测试
       try {
-        // 方法1: 尝试ping
-        await client.ping();
-        connected = true;
-        testResult = 'ping测试成功';
-      } catch (e) {
-        print('ping失败: $e');
-        testResult = 'ping失败: $e';
+        final uri = Uri.parse(cleanUrl);
+        final host = uri.host;
+        print('正在解析主机: $host');
 
-        try {
-          // 方法2: 使用原生HTTP测试
-          final httpResult = await _testWebDAVWithHttp(cleanUrl, _webdavUsername, _webdavPassword);
-          if (httpResult['success']) {
-            connected = true;
-            testResult = 'HTTP测试成功: ${httpResult['message']}';
-          } else {
-            testResult = 'HTTP测试失败: ${httpResult['message']}';
-          }
-        } catch (e2) {
-          print('HTTP测试失败: $e2');
-          testResult = '所有测试方法都失败: $e2';
+        // 尝试解析主机名，添加超时
+        final addresses = await InternetAddress.lookup(host).timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            throw TimeoutException('DNS解析超时', const Duration(seconds: 10));
+          },
+        );
+
+        if (addresses.isEmpty) {
+          return {
+            'success': false,
+            'message': '无法解析主机名: $host\n\n可能的原因：\n1. 网络连接问题\n2. DNS服务器问题\n3. WebDAV服务器地址错误\n\n建议：\n• 检查网络连接\n• 尝试更换DNS服务器(8.8.8.8)\n• 确认WebDAV服务器地址正确',
+          };
         }
+        print('主机解析成功: ${addresses.first.address}');
+      } catch (e) {
+        print('网络连接测试失败: $e');
+        String errorMessage = '网络连接失败\n\n错误详情: $e\n\n解决建议：\n';
+
+        if (e.toString().contains('Failed host lookup')) {
+          errorMessage += '• DNS解析失败，请检查网络连接\n';
+          errorMessage += '• 尝试更换DNS服务器(8.8.8.8)\n';
+          errorMessage += '• 检查WebDAV服务器地址是否正确\n';
+        } else if (e.toString().contains('TimeoutException')) {
+          errorMessage += '• 连接超时，请检查网络速度\n';
+          errorMessage += '• 检查防火墙设置\n';
+          errorMessage += '• 尝试使用其他网络环境\n';
+        } else {
+          errorMessage += '• 检查网络连接是否正常\n';
+          errorMessage += '• 检查WebDAV服务器地址是否正确\n';
+          errorMessage += '• 检查防火墙设置\n';
+        }
+
+        return {
+          'success': false,
+          'message': errorMessage,
+        };
       }
 
-      Navigator.pop(context); // 关闭加载对话框
-
-      // 延迟显示结果，确保对话框完全关闭
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      if (connected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('WebDAV连接测试成功！\n$testResult'),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 5),
-            margin: const EdgeInsets.all(16),
-          ),
+      // 尝试WebDAV连接
+      try {
+        final client = newClient(
+          cleanUrl,
+          user: _webdavUsername,
+          password: _webdavPassword,
+          debug: true,
         );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('WebDAV连接测试失败！\n$testResult'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 8),
-            margin: const EdgeInsets.all(16),
-          ),
-        );
+
+        // 方法1: 尝试ping
+        try {
+          await client.ping().timeout(const Duration(seconds: 15));
+          return {
+            'success': true,
+            'message': 'WebDAV连接测试成功！\n服务器响应正常',
+          };
+        } catch (e) {
+          print('ping失败: $e');
+
+          // 方法2: 使用原生HTTP测试
+          try {
+            final httpResult = await _testWebDAVWithHttp(cleanUrl, _webdavUsername, _webdavPassword);
+            if (httpResult['success']) {
+              return {
+                'success': true,
+                'message': 'WebDAV连接测试成功！\n${httpResult['message']}',
+              };
+            } else {
+              return {
+                'success': false,
+                'message': 'WebDAV连接失败\n\n${httpResult['message']}\n\n请检查：\n• 用户名和密码是否正确\n• 服务器是否支持WebDAV协议\n• 账户是否有WebDAV访问权限',
+              };
+            }
+          } catch (e2) {
+            print('HTTP测试失败: $e2');
+            return {
+              'success': false,
+              'message': 'WebDAV连接失败\n\n所有测试方法都失败\n\n错误详情: $e2\n\n可能的原因：\n• 服务器不支持WebDAV协议\n• 认证信息错误\n• 网络连接不稳定\n• 服务器配置问题',
+            };
+          }
+        }
+      } catch (e) {
+        print('WebDAV客户端创建失败: $e');
+        return {
+          'success': false,
+          'message': 'WebDAV客户端创建失败\n\n错误详情: $e\n\n请检查WebDAV服务器地址格式是否正确',
+        };
       }
     } catch (e) {
-      Navigator.pop(context); // 关闭加载对话框
-
-      // 延迟显示结果，确保对话框完全关闭
-      await Future.delayed(const Duration(milliseconds: 300));
-
       print('WebDAV连接异常: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('WebDAV连接测试异常: $e'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 8),
-          margin: const EdgeInsets.all(16),
-        ),
-      );
+      return {
+        'success': false,
+        'message': '连接异常: $e\n\n请检查网络连接和服务器配置',
+      };
     }
+  }
+
+  void _showWebDAVTestResult(bool success, String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              success ? Icons.check_circle : Icons.error,
+              color: success ? Colors.green : Colors.red,
+              size: 24,
+            ),
+            const SizedBox(width: 8),
+            Text(success ? '连接成功' : '连接失败'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              success
+                ? 'WebDAV服务器连接测试成功！'
+                : 'WebDAV服务器连接测试失败！',
+              style: const TextStyle(fontSize: 16),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: success ? Colors.green.shade50 : Colors.red.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: success ? Colors.green.shade200 : Colors.red.shade200,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '详细信息:',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: success ? Colors.green.shade800 : Colors.red.shade800,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    message,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: success ? Colors.green.shade700 : Colors.red.shade700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (!success) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade200),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '💡 解决建议:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      '• 检查WebDAV服务器地址是否正确\n'
+                      '• 确认用户名和密码是否正确\n'
+                      '• 检查网络连接是否正常\n'
+                      '• 确认服务器是否支持WebDAV协议\n'
+                      '• 检查防火墙设置是否阻止了连接',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('确定'),
+          ),
+          if (!success)
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                // 延迟一下再显示配置对话框
+                Future.delayed(const Duration(milliseconds: 200), () {
+                  _showWebDAVConfigDialog();
+                });
+              },
+              child: const Text('重新配置'),
+            ),
+        ],
+      ),
+    );
   }
 
   Future<Map<String, dynamic>> _testWebDAVWithHttp(String url, String username, String password) async {
@@ -272,6 +418,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final headers = {
         'Authorization': 'Basic $credentials',
         'Content-Type': 'application/xml',
+        'Depth': '0',
       };
 
       // 尝试PROPFIND请求
@@ -285,31 +432,42 @@ class _SettingsPageState extends State<SettingsPage> {
   <D:allprop/>
 </D:propfind>''';
 
-      final response = await request.send().timeout(const Duration(seconds: 10));
+      final response = await request.send().timeout(const Duration(seconds: 15));
       final responseBody = await response.stream.bytesToString();
 
       print('HTTP响应状态: ${response.statusCode}');
       print('HTTP响应头: ${response.headers}');
+      print('HTTP响应体: $responseBody');
 
       if (response.statusCode == 200 || response.statusCode == 207) {
         return {
           'success': true,
-          'message': 'HTTP连接成功 (状态码: ${response.statusCode})',
+          'message': 'HTTP连接成功 (状态码: ${response.statusCode})\n服务器支持WebDAV协议',
         };
       } else if (response.statusCode == 401) {
         return {
           'success': false,
-          'message': '认证失败，请检查用户名和密码',
+          'message': '认证失败 (状态码: 401)\n\n请检查：\n• 用户名是否正确\n• 密码是否正确\n• 是否使用了应用密码（坚果云需要）',
+        };
+      } else if (response.statusCode == 403) {
+        return {
+          'success': false,
+          'message': '访问被拒绝 (状态码: 403)\n\n可能的原因：\n• 账户没有WebDAV访问权限\n• 服务器配置限制\n• 需要特殊权限',
         };
       } else if (response.statusCode == 404) {
         return {
           'success': false,
-          'message': 'WebDAV服务未找到，请检查URL路径',
+          'message': 'WebDAV服务未找到 (状态码: 404)\n\n请检查：\n• URL路径是否正确\n• 服务器是否支持WebDAV\n• 路径是否包含 /dav/ 或 /webdav/',
+        };
+      } else if (response.statusCode >= 500) {
+        return {
+          'success': false,
+          'message': '服务器错误 (状态码: ${response.statusCode})\n\n服务器内部错误，请稍后重试',
         };
       } else {
         return {
           'success': false,
-          'message': 'HTTP请求失败 (状态码: ${response.statusCode})',
+          'message': 'HTTP请求失败 (状态码: ${response.statusCode})\n\n响应内容: $responseBody',
         };
       }
     } catch (e) {
@@ -318,23 +476,45 @@ class _SettingsPageState extends State<SettingsPage> {
       // 根据错误类型提供更友好的提示
       String friendlyMessage;
       if (e.toString().contains('Operation not permitted')) {
-        friendlyMessage = 'macOS应用沙盒限制网络访问，请尝试：\n'
+        friendlyMessage = 'macOS应用沙盒限制网络访问\n\n解决方案：\n'
             '1. 重启应用以应用新的权限设置\n'
             '2. 检查系统偏好设置中的网络权限\n'
-            '3. 如果问题持续，请重新编译应用';
-      } else if (e.toString().contains('Connection failed')) {
-        friendlyMessage = '连接失败，请检查：\n'
-            '1. 网络连接是否正常\n'
-            '2. WebDAV服务器地址是否正确\n'
-            '3. 服务器是否可访问\n'
-            '4. 防火墙是否阻止了连接';
-      } else if (e.toString().contains('timeout')) {
-        friendlyMessage = '连接超时，请检查：\n'
-            '1. 网络速度\n'
-            '2. 服务器响应时间\n'
-            '3. 防火墙设置';
+            '3. 如果问题持续，请重新编译应用\n'
+            '4. 尝试在终端中运行应用';
+      } else if (e.toString().contains('Connection failed') || e.toString().contains('Failed host lookup')) {
+        friendlyMessage = '网络连接失败\n\n可能的原因：\n'
+            '1. 网络连接不稳定\n'
+            '2. DNS解析失败\n'
+            '3. 服务器地址错误\n'
+            '4. 防火墙阻止连接\n\n'
+            '建议：\n'
+            '• 检查网络连接\n'
+            '• 尝试更换DNS服务器(8.8.8.8)\n'
+            '• 检查WebDAV服务器地址';
+      } else if (e.toString().contains('timeout') || e.toString().contains('TimeoutException')) {
+        friendlyMessage = '连接超时\n\n可能的原因：\n'
+            '1. 网络速度慢\n'
+            '2. 服务器响应慢\n'
+            '3. 防火墙设置\n'
+            '4. 网络不稳定\n\n'
+            '建议：\n'
+            '• 检查网络速度\n'
+            '• 尝试使用其他网络\n'
+            '• 检查防火墙设置';
+      } else if (e.toString().contains('HandshakeException')) {
+        friendlyMessage = 'SSL/TLS握手失败\n\n可能的原因：\n'
+            '1. 证书问题\n'
+            '2. 协议版本不匹配\n'
+            '3. 服务器配置问题\n\n'
+            '建议：\n'
+            '• 检查服务器SSL证书\n'
+            '• 尝试使用http://而不是https://\n'
+            '• 联系服务器管理员';
       } else {
-        friendlyMessage = '网络连接异常: ${e.toString()}';
+        friendlyMessage = '网络连接异常\n\n错误详情: $e\n\n建议：\n'
+            '• 检查网络连接\n'
+            '• 检查WebDAV服务器配置\n'
+            '• 尝试使用其他网络环境';
       }
 
       return {
@@ -346,28 +526,109 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _selectLocalStoragePath() async {
     try {
-      String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
+      final selectedDirectory = await _storageService.selectStoragePath();
 
       if (selectedDirectory != null) {
         setState(() {
           _localStoragePath = selectedDirectory;
         });
-        await _saveSettings();
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('本地存储路径已设置为: $selectedDirectory'),
+            backgroundColor: Colors.green,
             behavior: SnackBarBehavior.floating,
           ),
         );
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('选择路径失败: $e'),
-          behavior: SnackBarBehavior.floating,
+      if (e is StoragePathException) {
+        _showPermissionGuideDialog(e);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('选择路径失败: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  void _showPermissionGuideDialog(StoragePathException exception) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => PermissionGuidePage(
+          selectedPath: exception.path,
+          onRetry: () {
+            Navigator.of(context).pop();
+            _selectLocalStoragePath();
+          },
+          onSkip: () {
+            Navigator.of(context).pop();
+          },
         ),
-      );
+      ),
+    );
+  }
+
+  Future<void> _showPathDebugInfo() async {
+    try {
+      final debugInfo = await _storageService.getPathDebugInfo();
+
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('路径调试信息'),
+            content: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: debugInfo.entries.map((entry) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 120,
+                          child: Text(
+                            '${entry.key}:',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        Expanded(
+                          child: SelectableText(
+                            entry.value,
+                            style: const TextStyle(fontFamily: 'monospace'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('关闭'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('获取调试信息失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -400,9 +661,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 const SizedBox(height: 4),
                 TextField(
                   decoration: const InputDecoration(
-                    hintText: 'https://example.com/webdav',
+                    hintText: 'https://dav.jianguoyun.com/dav/',
                     border: OutlineInputBorder(),
-                    helperText: '支持http://和https://协议',
+                    helperText: '支持http://和https://协议\n常见服务商：\n• 坚果云: https://dav.jianguoyun.com/dav/\n• Nextcloud: https://your-domain.com/remote.php/dav/\n• OwnCloud: https://your-domain.com/remote.php/webdav/',
                   ),
                   controller: TextEditingController(text: _webdavUrl),
                   onChanged: (value) {
@@ -608,6 +869,13 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: _localStoragePath.isEmpty ? '未设置' : _localStoragePath,
             icon: Icons.folder,
             onTap: _selectLocalStoragePath,
+          ),
+
+          _buildListTile(
+            title: '路径调试信息',
+            subtitle: '查看路径处理详情',
+            icon: Icons.bug_report,
+            onTap: _showPathDebugInfo,
           ),
 
           _buildListTile(

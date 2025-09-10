@@ -18,6 +18,7 @@ dependencies:
   flutter_charset_detector: ^5.0.0
   http: ^1.1.0
   webdav_client: ^1.2.2
+  path: ^1.8.3
 
 dev_dependencies:
   flutter_test:
