@@ -19,6 +19,7 @@ dependencies:
   http: ^1.1.0
   webdav_client: ^1.2.2
   path: ^1.8.3
+  archive: ^3.4.0
 
 dev_dependencies:
   flutter_test:

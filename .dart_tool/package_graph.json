@@ -7,6 +7,7 @@
       "name": "book_reader",
       "version": "1.0.0+1",
       "dependencies": [
+        "archive",
         "cupertino_icons",
         "file_picker",
         "flutter",
@@ -47,6 +48,14 @@
         "stream_channel",
         "test_api",
         "vector_math"
+      ]
+    },
+    {
+      "name": "archive",
+      "version": "3.6.1",
+      "dependencies": [
+        "crypto",
+        "path"
       ]
     },
     {
@@ -245,6 +254,13 @@
         "stream_channel",
         "string_scanner",
         "term_glyph"
+      ]
+    },
+    {
+      "name": "crypto",
+      "version": "3.0.6",
+      "dependencies": [
+        "typed_data"
       ]
     },
     {

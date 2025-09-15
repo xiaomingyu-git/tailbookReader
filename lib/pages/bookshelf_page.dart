@@ -6,6 +6,7 @@ import '../models/book.dart';
 import '../services/storage_service.dart';
 import '../services/book_service.dart';
 import 'reading_page.dart';
+import 'storage_management_page.dart';
 
 class BookshelfPage extends StatefulWidget {
   const BookshelfPage({super.key});
@@ -54,6 +55,62 @@ class _BookshelfPageState extends State<BookshelfPage> {
     }
   }
 
+  /// 提取书籍标题（去掉时间戳前缀）
+  String _extractBookTitle(String fileName) {
+    // 去掉文件扩展名
+    String title = fileName.split('.').first;
+
+    // 去掉时间戳前缀（格式：数字_）
+    final timestampPattern = RegExp(r'^\d+_');
+    if (timestampPattern.hasMatch(title)) {
+      title = title.replaceFirst(timestampPattern, '');
+    }
+
+    // 去掉多个时间戳前缀（处理嵌套时间戳）
+    while (timestampPattern.hasMatch(title)) {
+      title = title.replaceFirst(timestampPattern, '');
+    }
+
+    return title;
+  }
+
+  /// 刷新书架（从同步文件重新读取）
+  Future<void> _refreshBookshelf() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final books = await _bookService.refreshBooksFromSync();
+      setState(() {
+        _books = books;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已从同步文件刷新书架，共 ${books.length} 本书籍'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('刷新书架失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('刷新书架失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
   Future<void> _importBook() async {
     try {
       // 获取本地存储路径
@@ -79,55 +136,85 @@ class _BookshelfPageState extends State<BookshelfPage> {
 
       if (result != null) {
         int successCount = 0;
+        int skippedCount = 0;
+        List<String> skippedFiles = [];
+
+        // 先获取当前所有书籍，避免在循环中重复查询
+        final currentBooks = await _bookService.getAllBooks();
+        final existingTitles = currentBooks.map((book) => book.title).toSet();
 
         for (var file in result.files) {
           if (file.path != null) {
             try {
-              // 创建书籍存储目录
+              final fileName = file.name;
+              // 提取书籍标题（去掉时间戳前缀）
+              final bookTitle = _extractBookTitle(fileName);
+              final bookId = bookTitle.hashCode.toString();
+
+              // 第一步：检查当前会话中是否已存在这个标题
+              if (existingTitles.contains(bookTitle)) {
+                // 如果已存在，跳过导入
+                skippedCount++;
+                skippedFiles.add(fileName);
+                print('跳过导入，已存在相同标题: ${fileName} -> ${bookTitle}');
+                continue;
+              }
+
+              // 第二步：检查book文件夹中是否有相同hash值的文件
               final booksDirPath = await _storageService.createBooksDirectory();
               final booksDir = Directory(booksDirPath);
-
-              // 生成唯一的文件名
-              final timestamp = DateTime.now().millisecondsSinceEpoch;
-              final fileName = '${timestamp}_${file.name}';
               final targetPath = path.join(booksDir.path, fileName);
 
-              // 复制文件到本地存储路径
-              final sourceFile = File(file.path!);
+              String finalFilePath = targetPath;
+              bool needCopy = true;
 
-              try {
-                await sourceFile.copy(targetPath);
-              } catch (copyError) {
-                print('文件复制失败: $copyError');
-                // 如果复制失败，尝试使用原始路径
-                if (copyError.toString().contains('Operation not permitted')) {
-                  throw Exception('文件复制权限不足，请检查：\n'
-                      '1. 目标文件夹的写入权限\n'
-                      '2. 应用的文件访问权限\n'
-                      '3. 尝试选择其他存储路径');
-                } else {
-                  throw Exception('文件复制失败: $copyError');
+              // 检查book文件夹中是否已存在同名文件
+              final existingFile = File(targetPath);
+              if (await existingFile.exists()) {
+                // 如果book文件夹中已存在同名文件，直接使用，不需要复制
+                print('book文件夹中已存在同名文件，直接使用: ${fileName}');
+                finalFilePath = targetPath;
+                needCopy = false;
+              } else {
+                // 第三步：如果都不存在，复制文件到book文件夹
+                final sourceFile = File(file.path!);
+
+                try {
+                  await sourceFile.copy(targetPath);
+                  print('文件复制成功: ${fileName}');
+                } catch (copyError) {
+                  print('文件复制失败: $copyError');
+                  // 如果复制失败，尝试使用原始路径
+                  if (copyError.toString().contains('Operation not permitted')) {
+                    throw Exception('文件复制权限不足，请检查：\n'
+                        '1. 目标文件夹的写入权限\n'
+                        '2. 应用的文件访问权限\n'
+                        '3. 尝试选择其他存储路径');
+                  } else {
+                    throw Exception('文件复制失败: $copyError');
+                  }
                 }
               }
 
+              // 创建书籍记录
               final book = Book(
-                id: timestamp.toString(),
-                title: file.name.split('.').first,
+                id: bookId,
+                title: bookTitle,
                 author: '未知作者',
                 coverPath: null,
-                filePath: targetPath,
+                filePath: finalFilePath,
                 lastReadPosition: 0,
                 totalChapters: 0,
                 currentChapter: 1,
               );
 
-              // 使用BookService保存书籍
+              // 使用BookService保存书籍到book.sync
               final success = await _bookService.addBook(book);
               if (success) {
-                setState(() {
-                  _books.add(book);
-                });
+                // 更新本地缓存，避免后续文件重复添加
+                existingTitles.add(bookTitle);
                 successCount++;
+                print('书籍记录已添加到book.sync: ${book.title}');
               } else {
                 print('保存书籍到数据库失败: ${book.title}');
               }
@@ -149,11 +236,23 @@ class _BookshelfPageState extends State<BookshelfPage> {
           }
         }
 
+        // 重新加载书籍列表以更新UI
+        await _loadBooks();
+
         if (mounted) {
+          String message = '成功导入 $successCount 本书籍';
+          if (skippedCount > 0) {
+            message += '\n跳过 $skippedCount 个文件（book.sync中已存在）';
+            if (skippedFiles.isNotEmpty) {
+              message += '\n跳过的文件：${skippedFiles.join(', ')}';
+            }
+          }
+
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('成功导入 $successCount 本书籍到本地存储'),
+              content: Text(message),
               behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: skippedCount > 0 ? 5 : 3),
             ),
           );
         }
@@ -184,7 +283,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除书籍'),
-        content: Text('确定要删除《${book.title}》吗？\n\n此操作不可撤销。'),
+        content: Text('确定要删除《${book.title}》吗？\n\n此操作将同时删除：\n• 书籍记录\n• 物理文件\n\n此操作不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -272,22 +371,6 @@ class _BookshelfPageState extends State<BookshelfPage> {
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: const Icon(Icons.search),
-            title: const Text('搜索书籍'),
-            onTap: () {
-              Navigator.pop(context);
-              // 搜索框已经在UI中显示
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.refresh),
-            title: const Text('刷新书架'),
-            onTap: () {
-              Navigator.pop(context);
-              _loadBooks();
-            },
-          ),
-          ListTile(
             leading: const Icon(Icons.cleaning_services),
             title: const Text('清理无效书籍'),
             onTap: () {
@@ -296,19 +379,15 @@ class _BookshelfPageState extends State<BookshelfPage> {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.backup),
-            title: const Text('导出书籍数据'),
+            leading: const Icon(Icons.storage),
+            title: const Text('存储管理'),
             onTap: () {
               Navigator.pop(context);
-              _exportBooksData();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.upload),
-            title: const Text('导入书籍数据'),
-            onTap: () {
-              Navigator.pop(context);
-              _importBooksData();
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => const StorageManagementPage(),
+                ),
+              );
             },
           ),
         ],
@@ -351,71 +430,6 @@ class _BookshelfPageState extends State<BookshelfPage> {
     }
   }
 
-  Future<void> _exportBooksData() async {
-    try {
-      final filePath = await _bookService.exportBooksData();
-      if (filePath != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('书籍数据已导出到: $filePath'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-      } else {
-        throw Exception('导出失败');
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('导出失败: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _importBooksData() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-        allowMultiple: false,
-      );
-
-      if (result != null && result.files.isNotEmpty) {
-        final filePath = result.files.first.path;
-        if (filePath != null) {
-          final success = await _bookService.importBooksData(filePath);
-          if (success) {
-            await _loadBooks(); // 重新加载书籍列表
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('书籍数据导入成功'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-            }
-          } else {
-            throw Exception('导入失败');
-          }
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('导入失败: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -424,84 +438,50 @@ class _BookshelfPageState extends State<BookshelfPage> {
         title: const Text('我的书架'),
         actions: [
           IconButton(
+            onPressed: _refreshBookshelf,
+            icon: const Icon(Icons.refresh),
+            tooltip: '刷新书架',
+          ),
+          IconButton(
             onPressed: _importBook,
             icon: const Icon(Icons.add),
             tooltip: '导入书籍',
           ),
-          if (_books.isNotEmpty)
-            IconButton(
-              onPressed: () => _showBooksMenu(context),
-              icon: const Icon(Icons.more_vert),
-              tooltip: '更多选项',
-            ),
+          IconButton(
+            onPressed: () => _showBooksMenu(context),
+            icon: const Icon(Icons.more_vert),
+            tooltip: '更多选项',
+          ),
         ],
       ),
       body: Column(
         children: [
-          // 搜索框
-          if (_books.isNotEmpty || _isSearching)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: TextField(
-                onChanged: _searchBooks,
-                decoration: InputDecoration(
-                  hintText: '搜索书籍...',
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: _searchQuery.isNotEmpty
-                      ? IconButton(
-                          onPressed: () => _searchBooks(''),
-                          icon: const Icon(Icons.clear),
-                        )
-                      : null,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
+          // 搜索框 - 始终显示
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              onChanged: _searchBooks,
+              decoration: InputDecoration(
+                hintText: '搜索书籍...',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isNotEmpty
+                    ? IconButton(
+                        onPressed: () => _searchBooks(''),
+                        icon: const Icon(Icons.clear),
+                      )
+                    : null,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
+          ),
 
           // 书籍列表或空状态
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
-                : _displayedBooks.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.library_books_outlined,
-                              size: 80,
-                              color: Theme.of(context).colorScheme.outline,
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              _searchQuery.isEmpty ? '书架空空如也' : '未找到相关书籍',
-                              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                    color: Theme.of(context).colorScheme.outline,
-                                  ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _searchQuery.isEmpty
-                                  ? '点击右上角的 + 号导入书籍'
-                                  : '尝试其他搜索关键词',
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                    color: Theme.of(context).colorScheme.outline,
-                                  ),
-                            ),
-                            if (_searchQuery.isEmpty) ...[
-                              const SizedBox(height: 24),
-                              ElevatedButton.icon(
-                                onPressed: _importBook,
-                                icon: const Icon(Icons.add),
-                                label: const Text('导入书籍'),
-                              ),
-                            ],
-                          ],
-                        ),
-                      )
-                    : _buildBooksGrid(),
+                : _buildBooksGrid(),
           ),
         ],
       ),
@@ -509,76 +489,68 @@ class _BookshelfPageState extends State<BookshelfPage> {
   }
 
   Widget _buildBooksGrid() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // 根据屏幕宽度动态计算列数
-        final screenWidth = constraints.maxWidth;
-        int crossAxisCount;
-        double childAspectRatio;
-        double crossAxisSpacing;
-        double mainAxisSpacing;
+    // 如果没有书籍，显示简单的空状态
+    if (_displayedBooks.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.library_books_outlined,
+              size: 80,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              _searchQuery.isEmpty ? '书架空空如也' : '未找到相关书籍',
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _searchQuery.isEmpty
+                  ? '点击右上角的 + 号导入书籍'
+                  : '尝试其他搜索关键词',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+            ),
+            if (_searchQuery.isEmpty) ...[
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _importBook,
+                icon: const Icon(Icons.add),
+                label: const Text('导入书籍'),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
 
-        if (screenWidth > 1200) {
-          // 超大屏幕：6列
-          crossAxisCount = 6;
-          childAspectRatio = 0.65;
-          crossAxisSpacing = 12;
-          mainAxisSpacing = 12;
-        } else if (screenWidth > 900) {
-          // 大屏幕：5列
-          crossAxisCount = 5;
-          childAspectRatio = 0.65;
-          crossAxisSpacing = 12;
-          mainAxisSpacing = 12;
-        } else if (screenWidth > 600) {
-          // 中等屏幕：4列
-          crossAxisCount = 4;
-          childAspectRatio = 0.7;
-          crossAxisSpacing = 14;
-          mainAxisSpacing = 14;
-        } else if (screenWidth > 400) {
-          // 小屏幕：3列
-          crossAxisCount = 3;
-          childAspectRatio = 0.7;
-          crossAxisSpacing = 16;
-          mainAxisSpacing = 16;
-        } else {
-          // 手机屏幕：2列
-          crossAxisCount = 2;
-          childAspectRatio = 0.7;
-          crossAxisSpacing = 16;
-          mainAxisSpacing = 16;
-        }
-
-        return GridView.builder(
-          padding: const EdgeInsets.all(16),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: crossAxisCount,
-            childAspectRatio: childAspectRatio,
-            crossAxisSpacing: crossAxisSpacing,
-            mainAxisSpacing: mainAxisSpacing,
-          ),
-          itemCount: _displayedBooks.length,
-          itemBuilder: (context, index) {
-            final book = _displayedBooks[index];
-            return BookCard(
-              book: book,
-              onTap: () => _openBook(book),
-              onDelete: () => _deleteBook(book),
-            );
-          },
+    // 有书籍时显示列表布局
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _displayedBooks.length,
+      itemBuilder: (context, index) {
+        final book = _displayedBooks[index];
+        return BookListItem(
+          book: book,
+          onTap: () => _openBook(book),
+          onDelete: () => _deleteBook(book),
         );
       },
     );
   }
 }
 
-class BookCard extends StatelessWidget {
+class BookListItem extends StatelessWidget {
   final Book book;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
-  const BookCard({
+  const BookListItem({
     super.key,
     required this.book,
     required this.onTap,
@@ -588,53 +560,51 @@ class BookCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 2,
+      elevation: 1,
+      margin: const EdgeInsets.only(bottom: 8),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          padding: const EdgeInsets.all(16),
+          child: Row(
             children: [
               // 书籍封面
-              Expanded(
-                flex: 3,
-                child: Container(
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2),
-                    ),
+              Container(
+                width: 60,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2),
                   ),
-                  child: book.coverPath != null
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.file(
-                            File(book.coverPath!),
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) {
-                              return _buildDefaultCover(context);
-                            },
-                          ),
-                        )
-                      : _buildDefaultCover(context),
                 ),
+                child: book.coverPath != null
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.file(
+                          File(book.coverPath!),
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return _buildDefaultCover(context);
+                          },
+                        ),
+                      )
+                    : _buildDefaultCover(context),
               ),
 
-              const SizedBox(height: 8),
+              const SizedBox(width: 16),
 
-              // 书籍标题
+              // 书籍信息
               Expanded(
-                flex: 2,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // 书籍标题
                     Text(
                       book.title,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
                       maxLines: 2,
@@ -646,17 +616,17 @@ class BookCard extends StatelessWidget {
                     // 作者
                     Text(
                       book.author,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
 
-                    const Spacer(),
+                    const SizedBox(height: 8),
 
                     // 阅读进度
-                    if (book.lastReadPosition > 0)
+                    if (book.lastReadPosition > 0) ...[
                       LinearProgressIndicator(
                         value: book.lastReadPosition / 1000, // 假设总长度为1000
                         backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -664,21 +634,26 @@ class BookCard extends StatelessWidget {
                           Theme.of(context).colorScheme.primary,
                         ),
                       ),
+                      const SizedBox(height: 4),
+                    ],
+
+                    // 最后阅读时间
+                    if (book.lastReadTime != null)
+                      Text(
+                        '最后阅读: ${_formatLastReadTime(book.lastReadTime!)}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
                   ],
                 ),
               ),
 
               // 操作按钮
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  IconButton(
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                    iconSize: 18,
-                    tooltip: '删除书籍',
-                  ),
-                ],
+              IconButton(
+                onPressed: onDelete,
+                icon: const Icon(Icons.delete_outline),
+                tooltip: '删除书籍',
               ),
             ],
           ),
@@ -696,10 +671,26 @@ class BookCard extends StatelessWidget {
       child: Center(
         child: Icon(
           Icons.book_outlined,
-          size: 40,
+          size: 32,
           color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
     );
   }
+
+  String _formatLastReadTime(DateTime lastReadTime) {
+    final now = DateTime.now();
+    final difference = now.difference(lastReadTime);
+
+    if (difference.inDays > 0) {
+      return '${difference.inDays}天前';
+    } else if (difference.inHours > 0) {
+      return '${difference.inHours}小时前';
+    } else if (difference.inMinutes > 0) {
+      return '${difference.inMinutes}分钟前';
+    } else {
+      return '刚刚';
+    }
+  }
 }
+
